@@ -299,6 +299,7 @@ display:
 
 startup:
   RUN_ON_STARTUP: false    # register/unregister a Windows scheduled task
+                           # (runs the monitor elevated at logon)
   DELAY: 30                # task delay in seconds
 
 lhm:
@@ -328,6 +329,44 @@ The **default theme** is `NexusMeter`. You can:
 - Use the **Theme Editor** in the settings app for a live, clickable and
   draggable preview, or edit the raw YAML directly.
 
+### Supported theme elements
+
+A theme can place any combination of the following on the screen. Each block
+is positioned with `X`/`Y`, sized, aligned (`ALIGN`), anchored (`ANCHOR`: `lt`,
+`rt`, `mt`, …) and styled with a font + color. Every stat supports `SHOW: true`
+or `SHOW: false`, a per-stat update `INTERVAL` (seconds), and can be rendered as
+plain `TEXT`, a percentage `GRAPH`/bar, or both.
+
+- **CPU** — percentage (text + bar graph), frequency, temperature.
+- **GPU** — percentage (text + bar graph), memory, temperature.
+- **MEMORY** — used (bytes + percent), virtual-memory graph.
+- **NET** — upload / download speed per interface (WLO/ETH), as text.
+- **WEATHER** — current temperature, "feels like", humidity, a text
+  description, **and a weather icon** (see below).
+- **DATE** — time (hour), day of the week, with editable `FORMAT`
+  (`short` / `long` / custom).
+- **static text / static images** — fixed labels and overlays that never change
+  during runtime.
+
+### Weather icons
+
+`res/icons/weather/` ships ready-to-use weather icons (PNG). The weather block's
+`ICON` entry (`X`/`Y`/`WIDTH`/`HEIGHT`/`SHOW`) tells the monitor where to draw
+the matching icon. The icon is chosen automatically from the current conditions:
+
+| Condition            | Icon file       |
+|----------------------|-----------------|
+| Clear / sunny        | `sunny.png`     |
+| Partly / full cloud  | `cloudy.png`    |
+| Rain                 | `rainy.png`     |
+| Thunderstorms        | `stormy.png`    |
+| Snow                 | `snowy.png`     |
+| Mist / fog           | `foggy.png`     |
+
+Weather data comes from the free Open-Meteo API (no API key needed) using
+`WEATHER_LATITUDE` / `WEATHER_LONGITUDE` and updates every `WEATHER`
+`INTERVAL` seconds. The icon is alpha-blended onto the theme.
+
 Supported element value formats include things like `{VALUE}°C`, `UP {VALUE}
 KB/s`, etc., so units are fully under your control.
 
@@ -355,6 +394,62 @@ KB/s`, etc., so units are fully under your control.
   and the machine needs an internet connection (uses the free Open-Meteo API).
 - **Log file:** a `monitor.log` file next to the executable records startup
   steps and serial/display errors to help diagnose issues.
+
+### Run as Administrator is required for temperatures
+
+Windows does **not** expose temperature/fan readings to a normal (non-elevated)
+process the way it gives you CPU usage or memory. To read hardware temperatures
+you must run the monitor **as Administrator**, otherwise the temperature values
+stay unavailable/blank (the monitor itself logs a warning about this).
+
+- Recommended: enable **"Run on startup"** in the Settings app — the scheduled
+  task is created to run the monitor **with highest privileges**, so it starts
+  elevated on Windows logon without asking.
+- If you run the monitor manually, right-click the `.exe` → **Run as
+  administrator** so temperature readings appear.
+
+### Hardware sensors: HWiNFO / PawnIO
+
+Windows does not provide the low-level thermal/fan data directly either. This
+project relies on **LibreHardwareMonitor** (via `LibreHardwareMonitorLib.dll` +
+`lhm_reader.exe`) to read sensor values. On some systems LibreHardwareMonitor in
+turn depends on **HWiNFO** (referred to here as "PawnIO") being installed and
+running, because its sensor driver is what Windows needs to read the thermal
+chips. So for reliable CPU/GPU temperatures:
+
+1. Install/run **HWiNFO** (PawnIO sensor driver) so the thermal data is exposed.
+2. Make sure **LibreHardwareMonitor** is present (see the
+   [LibreHardwareMonitor](#librehardwaremonitor) section).
+3. Run the monitor as Administrator (required for elevated access to sensors).
+
+Without the sensor layer in place, the monitor still runs and draws CPU/memory/
+network/stats, but temperatures and fan readings will be missing.
+
+### Startup / Task Scheduler issues
+
+Enabling **"Run on startup"** registers a Windows Task Scheduler task that
+launches the monitor elevated at logon with a configurable delay (`DELAY`).
+Common problems and fixes:
+
+- **Task is "Activation" is not enabled / shows no trigger.** The task must have
+  an enabled **At logon** trigger. Recreate it from the Settings app (uncheck
+  then re-check "Run on startup") so the trigger is written correctly.
+- **Task is created but never runs.** Verify it appears in **Task Scheduler →
+  Task Scheduler Library → \\{monitor folder}** with status *Ready* and that the
+  **Run with highest privileges** checkbox is checked. Check the **Last Run
+  Result** code there.
+- **A console window flashes at logon.** The monitor is launched hidden; a brief
+  flash is normal. If it persists, ensure the task's program path points at the
+  actual `mini-system-monitor.exe` (working directory set to its folder).
+- **Monitor starts but screen stays black at logon.** The USB display may not
+  have finished enumerating yet — increase `startup: DELAY` in `config.yaml`
+  (e.g. 30–45 s) so the serial port is available.
+- **Task not created because not running as admin.** Registering a scheduled
+  task that runs with highest privileges requires an administrator account. Run
+  the Settings app as administrator to create/modify the task.
+- **Temperatures missing when auto-started from Task Scheduler.** Make sure the
+  task runs the monitor elevated ("highest privileges"), same as the manual
+  Administrator requirement above.
 
 ---
 
