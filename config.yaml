@@ -1,0 +1,43 @@
+---
+config:
+  # Set your COM port e.g. COM3 for Windows, /dev/ttyACM0 for Linux...
+  # Use AUTO for COM port auto-discovery
+  COM_PORT: 'AUTO'
+
+  # Theme to use (folder name under res/themes)
+  THEME: 'NexusMeter'
+
+  # Network interfaces for NET stats. Leave empty '' to sum ALL interfaces.
+  ETH: ''
+  WLO: ''
+
+  # Address used for ping/latency checks
+  PING: '8.8.8.8'
+
+  # Weather location and units (metric/imperial)
+  WEATHER_LATITUDE: 41.0138
+  WEATHER_LONGITUDE: 28.9497
+  WEATHER_UNITS: 'metric'
+
+display:
+  # Display brightness percentage (0-100)
+  BRIGHTNESS: 20
+
+  # Reverse display orientation: true/false
+  DISPLAY_REVERSE: false
+
+  # Reset display on startup: true/false (can change the COM port on some displays)
+  RESET_ON_STARTUP: true
+
+  # Shows the debug console window (hidden by default). Errors are
+  # always shown regardless of this setting.
+  SHOW_CONSOLE: false
+
+startup:
+  # Run the monitor as admin on Windows startup via Task Scheduler
+  RUN_ON_STARTUP: true
+  DELAY: 30
+
+lhm:
+  # Path to LibreHardwareMonitor folder (leave empty for default)
+  LHM_PATH: ''

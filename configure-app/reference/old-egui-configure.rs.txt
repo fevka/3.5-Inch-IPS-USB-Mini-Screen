@@ -1,0 +1,1860 @@
+// Settings app - Rust/egui counterpart of the original project's
+// configure.py + theme-editor.py.
+//
+// v5:
+//   - Full English UI.
+//   - Uses the SAME Renderer (mini_system_monitor::renderer) the real
+//     monitor uses, so previews are pixel-accurate, not approximations.
+//   - Theme Editor is a separate window with three panels: Canvas
+//     (drag elements), Live Preview (actual rendered look), and
+//     Properties (position, font, size, color, anchor, text).
+//   - Main window is larger and shows its own live preview of the
+//     selected theme.
+
+use eframe::egui;
+use image::Rgb;
+use mini_system_monitor::config::{self, AppConfig};
+use mini_system_monitor::renderer::Renderer;
+use std::path::{Path, PathBuf};
+use std::process::Command;
+use std::sync::{Arc, Mutex};
+use std::thread;
+use std::time::Duration;
+
+const ACCENT: egui::Color32 = egui::Color32::from_rgb(0, 191, 165); // Vibrant teal
+const ACCENT_DIM: egui::Color32 = egui::Color32::from_rgb(10, 58, 54); // Darker teal border
+const BG: egui::Color32 = egui::Color32::from_rgb(13, 17, 23); // Void black
+const CARD: egui::Color32 = egui::Color32::from_rgb(22, 27, 34); // Slate card bg
+const CARD_HI: egui::Color32 = egui::Color32::from_rgb(33, 38, 45); // Lighter slate card bg
+const BORDER: egui::Color32 = egui::Color32::from_rgb(48, 54, 61); // High quality dark borders
+const TEXT_DIM: egui::Color32 = egui::Color32::from_rgb(230, 237, 243); // Off-white main text
+const TEXT_FAINT: egui::Color32 = egui::Color32::from_rgb(139, 148, 158); // Muted gray secondary text
+const ERROR: egui::Color32 = egui::Color32::from_rgb(248, 113, 113); // Soft red
+const OK: egui::Color32 = egui::Color32::from_rgb(74, 222, 128); // Soft green
+const WARN_COLOR: egui::Color32 = egui::Color32::from_rgb(251, 191, 36); // Amber
+
+fn status_dot(ui: &mut egui::Ui, color: egui::Color32, label: &str) {
+    let time = ui.ctx().input(|i| i.time) as f32;
+    let pulse = (time * 2.5).sin().abs() * 0.5 + 0.5;
+    let glow = egui::Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), (pulse * 60.0 + 60.0) as u8);
+    let row_h = ui.text_style_height(&egui::TextStyle::Small).max(16.0);
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), row_h),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.label(egui::RichText::new(label).color(color).size(12.0));
+            let dot_r = 4.0;
+            let (rect, _) = ui.allocate_exact_size(egui::vec2(dot_r * 2.0, row_h), egui::Sense::hover());
+            let dot_center = rect.center();
+            ui.painter().circle_filled(dot_center, dot_r, color);
+            ui.painter().circle_filled(dot_center, dot_r + 2.0, glow);
+        },
+    );
+}
+
+fn main() -> eframe::Result {
+    env_logger::init();
+
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1065.0, 792.0])
+            .with_min_inner_size([970.0, 640.0]),
+        ..Default::default()
+    };
+
+    eframe::run_native(
+        "Mini System Monitor - Settings",
+        options,
+        Box::new(|cc| {
+            apply_style(&cc.egui_ctx);
+            cc.egui_ctx.set_embed_viewports(false);
+            Ok(Box::new(ConfigureApp::load(&cc.egui_ctx)))
+        }),
+    )
+}
+
+fn apply_style(ctx: &egui::Context) {
+    let font_path = config::resolve_path("res/RobotoMono-Regular.ttf");
+    if let Ok(bytes) = std::fs::read(&font_path) {
+        let mut fonts = egui::FontDefinitions::default();
+        fonts
+            .font_data
+            .insert("roboto_mono".to_owned(), egui::FontData::from_owned(bytes));
+        fonts
+            .families
+            .entry(egui::FontFamily::Proportional)
+            .or_default()
+            .insert(0, "roboto_mono".to_owned());
+        fonts
+            .families
+            .entry(egui::FontFamily::Monospace)
+            .or_default()
+            .insert(0, "roboto_mono".to_owned());
+        ctx.set_fonts(fonts);
+    }
+
+    let mut visuals = egui::Visuals::dark(); // Modern dark aesthetics
+    visuals.override_text_color = Some(TEXT_DIM);
+    visuals.window_fill = BG;
+    visuals.panel_fill = BG;
+    visuals.extreme_bg_color = egui::Color32::from_rgb(15, 20, 27); // Darker, cleaner background for text inputs
+    visuals.faint_bg_color = CARD;
+    visuals.widgets.noninteractive.bg_fill = CARD;
+    visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    visuals.widgets.noninteractive.fg_stroke.color = TEXT_DIM;
+    visuals.widgets.inactive.bg_fill = egui::Color32::from_rgb(28, 33, 40); // Base slate color for buttons/dropdowns
+    visuals.widgets.inactive.weak_bg_fill = egui::Color32::from_rgb(28, 33, 40);
+    visuals.widgets.inactive.bg_stroke = egui::Stroke::new(1.0_f32, BORDER);
+    visuals.widgets.inactive.fg_stroke.color = TEXT_DIM;
+    visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(44, 52, 64); // Distinct hover highlight
+    visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1.2_f32, ACCENT); // Active border highlight
+    visuals.widgets.hovered.fg_stroke.color = egui::Color32::WHITE;
+    visuals.widgets.active.bg_fill = ACCENT;
+    visuals.widgets.active.bg_stroke = egui::Stroke::new(1.2_f32, ACCENT);
+    visuals.widgets.active.fg_stroke.color = egui::Color32::from_rgb(13, 17, 23); // Dark text for contrast on accent background
+    visuals.selection.bg_fill = egui::Color32::from_rgba_unmultiplied(0, 191, 165, 40);
+    visuals.selection.stroke.color = ACCENT;
+    visuals.hyperlink_color = ACCENT;
+    visuals.window_rounding = egui::Rounding::same(10.0); // Modern 10px roundings
+    visuals.widgets.noninteractive.rounding = egui::Rounding::same(4.0);
+    visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+    visuals.widgets.hovered.rounding = egui::Rounding::same(4.0);
+    visuals.widgets.active.rounding = egui::Rounding::same(4.0);
+    ctx.set_visuals(visuals);
+
+    let mut style = (*ctx.style()).clone();
+    style.spacing.item_spacing = egui::vec2(12.0, 10.0);
+    style.spacing.button_padding = egui::vec2(14.0, 7.0);
+    style.spacing.window_margin = egui::Margin::same(20.0);
+    style.spacing.indent = 18.0;
+    style.spacing.scroll = egui::style::ScrollStyle {
+        floating: false, // reserve real space for the bar instead of drawing it over the content
+        bar_width: 8.0,
+        handle_min_length: 40.0,
+        bar_inner_margin: 4.0,
+        bar_outer_margin: 2.0,
+        ..egui::style::ScrollStyle::solid()
+    };
+    style.animation_time = 0.15;
+    ctx.set_style(style);
+}
+
+// ---------------------------------------------------------------------
+// YAML tree helpers (path: &[String])
+// ---------------------------------------------------------------------
+
+fn node_at<'a>(yaml: &'a serde_yaml::Value, path: &[String]) -> Option<&'a serde_yaml::Value> {
+    let mut cur = yaml;
+    for p in path {
+        cur = cur.get(p.as_str())?;
+    }
+    Some(cur)
+}
+
+fn node_at_mut<'a>(yaml: &'a mut serde_yaml::Value, path: &[String]) -> Option<&'a mut serde_yaml::Value> {
+    let mut cur = yaml;
+    for p in path {
+        cur = cur.get_mut(p.as_str())?;
+    }
+    Some(cur)
+}
+
+/// Finds every node in the theme tree that has both "X" and "Y" fields,
+/// regardless of depth - this automatically catches both static_text
+/// entries and every STATS.*.TEXT/GRAPH block without hardcoding paths.
+fn scan_elements(value: &serde_yaml::Value, path: &mut Vec<String>, out: &mut Vec<Vec<String>>) {
+    if let serde_yaml::Value::Mapping(map) = value {
+        let has_xy = map.contains_key(&serde_yaml::Value::String("X".to_string()))
+            && map.contains_key(&serde_yaml::Value::String("Y".to_string()));
+        if has_xy {
+            out.push(path.clone());
+        }
+        for (k, v) in map {
+            if let serde_yaml::Value::String(key) = k {
+                path.push(key.clone());
+                scan_elements(v, path, out);
+                path.pop();
+            }
+        }
+    }
+}
+
+fn set_field_i64(yaml: &mut serde_yaml::Value, path: &[String], field: &str, value: i64) {
+    if let Some(serde_yaml::Value::Mapping(map)) = node_at_mut(yaml, path) {
+        map.insert(serde_yaml::Value::String(field.to_string()), value.into());
+    }
+}
+
+fn set_field_str(yaml: &mut serde_yaml::Value, path: &[String], field: &str, value: &str) {
+    if let Some(serde_yaml::Value::Mapping(map)) = node_at_mut(yaml, path) {
+        map.insert(
+            serde_yaml::Value::String(field.to_string()),
+            serde_yaml::Value::String(value.to_string()),
+        );
+    }
+}
+
+fn load_texture_from_image(ctx: &egui::Context, name: &str, img: &image::RgbImage) -> egui::TextureHandle {
+    let (w, h) = (img.width(), img.height());
+    let color_image = egui::ColorImage::from_rgb([w as usize, h as usize], img.as_raw());
+    ctx.load_texture(name, color_image, egui::TextureOptions::LINEAR)
+}
+
+fn load_bg_image(path: &Path) -> Option<image::RgbImage> {
+    image::open(path).ok().map(|i| i.to_rgb8())
+}
+
+// ---------------------------------------------------------------------
+// Fonts & colors
+// ---------------------------------------------------------------------
+
+/// Finds every "FONT: ..." value anywhere in the theme tree.
+fn collect_font_names(value: &serde_yaml::Value, out: &mut Vec<String>) {
+    if let serde_yaml::Value::Mapping(map) = value {
+        for (k, v) in map {
+            if let serde_yaml::Value::String(key) = k {
+                if key == "FONT" {
+                    if let Some(s) = v.as_str() {
+                        out.push(s.to_string());
+                    }
+                    continue;
+                }
+            }
+            collect_font_names(v, out);
+        }
+    }
+}
+
+/// Loads every font referenced by the theme, caching each under its
+/// PLAIN name (as written in theme.yaml) so lookups at draw time match.
+fn load_theme_fonts(renderer: &mut Renderer, theme_dir: &Path, yaml: &serde_yaml::Value) {
+    let mut names = Vec::new();
+    collect_font_names(yaml, &mut names);
+    for font in names {
+        if renderer.fonts.contains_key(&font) {
+            continue;
+        }
+        let candidate1 = theme_dir.join(&font);
+        if let Some(f) = renderer.load_font(&candidate1.to_string_lossy()) {
+            renderer.fonts.insert(font.clone(), f);
+            continue;
+        }
+        let candidate2 = config::resolve_path(&format!("res/fonts/{}", font));
+        if let Some(f) = renderer.load_font(&candidate2.to_string_lossy()) {
+            renderer.fonts.insert(font, f);
+        }
+    }
+}
+
+/// Recursively finds every .ttf under `dir`, returned as paths relative
+/// to `root` with forward slashes (matching theme.yaml's FONT convention).
+fn scan_fonts_dir(root: &Path, dir: &Path, out: &mut Vec<String>) {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                scan_fonts_dir(root, &path, out);
+            } else if path
+                .extension()
+                .and_then(|e| e.to_str())
+                .map(|e| e.eq_ignore_ascii_case("ttf"))
+                .unwrap_or(false)
+            {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    out.push(rel.to_string_lossy().replace('\\', "/"));
+                }
+            }
+        }
+    }
+}
+
+fn scan_available_fonts(theme_dir: &Path) -> Vec<String> {
+    let mut out = Vec::new();
+    scan_fonts_dir(theme_dir, theme_dir, &mut out);
+    let res_fonts = config::resolve_path("res/fonts");
+    if res_fonts.exists() {
+        scan_fonts_dir(&res_fonts, &res_fonts, &mut out);
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+fn parse_rgb_csv(s: &str) -> Rgb<u8> {
+    let parts: Vec<i64> = s.split(',').filter_map(|p| p.trim().parse::<i64>().ok()).collect();
+    if parts.len() == 3 {
+        Rgb([parts[0].clamp(0, 255) as u8, parts[1].clamp(0, 255) as u8, parts[2].clamp(0, 255) as u8])
+    } else {
+        Rgb([255, 255, 255])
+    }
+}
+
+fn rgb_to_csv(rgb: [u8; 3]) -> String {
+    format!("{}, {}, {}", rgb[0], rgb[1], rgb[2])
+}
+
+/// Representative sample text for STATS fields that don't have a
+/// literal TEXT value (their real content comes from live sensors at
+/// runtime) - lets the preview look realistic without wiring up actual
+/// sensor polling inside the settings app.
+fn placeholder_text(path: &[String]) -> String {
+    let joined = path.join(".").to_uppercase();
+    if joined.contains("HOUR") {
+        chrono::Local::now().format("%H:%M").to_string()
+    } else if joined.contains("DAY") {
+        chrono::Local::now().format("%a %d %b").to_string()
+    } else if joined.contains("UPTIME") || joined.contains("FORMATTED") {
+        "02:14:33".to_string()
+    } else if joined.contains("TEMPERATURE_FELT") {
+        "54°".to_string()
+    } else if joined.contains("TEMPERATURE") {
+        "56°C".to_string()
+    } else if joined.contains("FREQUENCY") || joined.contains("CLOCK") {
+        "3200 MHz".to_string()
+    } else if joined.contains("UPLOAD") {
+        "UP 512 KB/s".to_string()
+    } else if joined.contains("DOWNLOAD") {
+        "DN 2.1 MB/s".to_string()
+    } else if joined.contains("HUMIDITY") {
+        "48%".to_string()
+    } else if joined.contains("USED") {
+        "8.2 GB".to_string()
+    } else if joined.contains("PERCENT") || joined.contains("LOAD") || joined.contains("VIRTUAL") {
+        "42%".to_string()
+    } else if joined.contains("WEATHER") {
+        "21°".to_string()
+    } else {
+        "123".to_string()
+    }
+}
+
+/// Renders the theme (background + every visible element, using real
+/// fonts/colors/positions and representative sample values) into a
+/// single image - the same drawing code path the real monitor uses.
+fn render_theme_preview(
+    renderer: &mut Renderer,
+    bg: &image::RgbImage,
+    yaml: &serde_yaml::Value,
+    elements: &[Vec<String>],
+) -> image::RgbImage {
+    let mut img = bg.clone();
+    for path in elements {
+        let Some(node) = node_at(yaml, path) else { continue };
+        let show = node.get("SHOW").and_then(|v| v.as_bool()).unwrap_or(true);
+        if !show {
+            continue;
+        }
+        let x = node.get("X").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+        let y = node.get("Y").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+        if node.get("WIDTH").is_some() && node.get("HEIGHT").is_some() && node.get("PATH").is_none() {
+            let w = node.get("WIDTH").and_then(|v| v.as_i64()).unwrap_or(80);
+            let h = node.get("HEIGHT").and_then(|v| v.as_i64()).unwrap_or(10);
+            let bar_color = node
+                .get("BAR_COLOR")
+                .and_then(|v| v.as_str())
+                .map(parse_rgb_csv)
+                .unwrap_or(Rgb([180, 80, 255]));
+            renderer.draw_progress_bar(&mut img, x, y, w as u32, h as u32, 100.0, bar_color);
+            continue;
+        }
+
+        let font = node.get("FONT").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let font_size = node.get("FONT_SIZE").and_then(|v| v.as_f64()).unwrap_or(14.0) as f32;
+        let color = node
+            .get("FONT_COLOR")
+            .and_then(|v| v.as_str())
+            .map(parse_rgb_csv)
+            .unwrap_or(Rgb([255, 255, 255]));
+        let anchor = node.get("ANCHOR").and_then(|v| v.as_str()).unwrap_or("lt").to_string();
+        let text = node
+            .get("TEXT")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| placeholder_text(path));
+
+        let (tw, th) = renderer.measure_text(&text, font_size, font.as_deref());
+        let mut chars = anchor.chars();
+        let ha = chars.next().unwrap_or('l');
+        let va = chars.next().unwrap_or('t');
+        let dx = match ha {
+            'r' => x - tw as i32,
+            'm' => x - (tw as i32) / 2,
+            _ => x,
+        };
+        let dy = match va {
+            'b' => y - th as i32,
+            'm' => y - (th as i32) / 2,
+            _ => y,
+        };
+        renderer.draw_text_font(&mut img, &text, dx, dy, font_size, color, font.as_deref());
+    }
+    img
+}
+
+// ---------------------------------------------------------------------
+
+#[derive(Clone)]
+struct CityResult {
+    name: String,
+    admin1: String,
+    country: String,
+    latitude: f64,
+    longitude: f64,
+}
+
+#[derive(Default)]
+struct CitySearchState {
+    searching: bool,
+    results: Vec<CityResult>,
+    error: Option<String>,
+}
+
+struct VisualEditorState {
+    loaded: bool,
+    yaml: serde_yaml::Value,
+    elements: Vec<Vec<String>>,
+    selected: Option<usize>,
+    bg_image: Option<image::RgbImage>,
+    canvas_texture: Option<egui::TextureHandle>,
+    preview_texture: Option<egui::TextureHandle>,
+    img_size: (u32, u32),
+    status: String,
+    dirty: bool,
+    renderer: Renderer,
+}
+
+impl Default for VisualEditorState {
+    fn default() -> Self {
+        VisualEditorState {
+            loaded: false,
+            yaml: serde_yaml::Value::Null,
+            elements: Vec::new(),
+            selected: None,
+            bg_image: None,
+            canvas_texture: None,
+            preview_texture: None,
+            img_size: (320, 480),
+            status: String::new(),
+            dirty: false,
+            renderer: Renderer::new(),
+        }
+    }
+}
+
+#[derive(PartialEq, Clone, Copy)]
+enum EditorTab {
+    Visual,
+    Raw,
+}
+
+struct ConfigureApp {
+    com_port: String,
+    theme: String,
+    eth: String,
+    wlo: String,
+    ping: String,
+    weather_latitude: f64,
+    weather_longitude: f64,
+    weather_units_metric: bool,
+    weather_location_label: String,
+
+    brightness: u8,
+    display_reverse: bool,
+    reset_on_startup: bool,
+
+    available_ports: Vec<String>,
+    available_themes: Vec<String>,
+    themes_root: PathBuf,
+    available_interfaces: Vec<String>,
+    status: String,
+    status_is_error: bool,
+
+    city_query: String,
+    city_search: Arc<Mutex<CitySearchState>>,
+    show_manual_coords: bool,
+
+    theme_editor_open: bool,
+    editor_tab: EditorTab,
+    visual_editor: VisualEditorState,
+    theme_yaml_text: String,
+    theme_yaml_status: String,
+
+    // Small live preview shown in the main window itself.
+    main_preview_renderer: Renderer,
+    main_preview_texture: Option<egui::TextureHandle>,
+    main_preview_for_theme: String,
+}
+
+impl ConfigureApp {
+    fn load(ctx: &egui::Context) -> Self {
+        let loaded = AppConfig::load("config.yaml").ok();
+        let cfg = loaded.as_ref();
+
+        let com_port = cfg
+            .and_then(|c| c.config.com_port.clone())
+            .unwrap_or_else(|| "AUTO".to_string());
+        let theme = cfg
+            .and_then(|c| c.config.theme.clone())
+            .unwrap_or_else(|| "NexusMeter".to_string());
+        let eth = cfg.and_then(|c| c.config.eth.clone()).unwrap_or_default();
+        let wlo = cfg.and_then(|c| c.config.wlo.clone()).unwrap_or_default();
+        let ping = cfg
+            .and_then(|c| c.config.ping.clone())
+            .unwrap_or_else(|| "8.8.8.8".to_string());
+        let weather_latitude = cfg.and_then(|c| c.config.weather_latitude).unwrap_or(41.01);
+        let weather_longitude = cfg.and_then(|c| c.config.weather_longitude).unwrap_or(28.95);
+        let weather_units_metric = cfg
+            .and_then(|c| c.config.weather_units.clone())
+            .map(|u| !u.eq_ignore_ascii_case("imperial"))
+            .unwrap_or(true);
+
+        let brightness = cfg.and_then(|c| c.display.brightness).unwrap_or(20);
+        let display_reverse = cfg.and_then(|c| c.display.display_reverse).unwrap_or(false);
+        let reset_on_startup = cfg.and_then(|c| c.display.reset_on_startup).unwrap_or(false);
+
+        let mut app = ConfigureApp {
+            com_port,
+            theme,
+            eth,
+            wlo,
+            ping,
+            weather_latitude,
+            weather_longitude,
+            weather_units_metric,
+            weather_location_label: String::new(),
+            brightness,
+            display_reverse,
+            reset_on_startup,
+            available_ports: Vec::new(),
+            available_themes: Vec::new(),
+            themes_root: PathBuf::new(),
+            available_interfaces: Vec::new(),
+            status: if loaded.is_some() {
+                String::new()
+            } else {
+                "config.yaml not found - starting with defaults.".to_string()
+            },
+            status_is_error: loaded.is_none(),
+            city_query: String::new(),
+            city_search: Arc::new(Mutex::new(CitySearchState::default())),
+            show_manual_coords: false,
+            theme_editor_open: false,
+            editor_tab: EditorTab::Visual,
+            visual_editor: VisualEditorState::default(),
+            theme_yaml_text: String::new(),
+            theme_yaml_status: String::new(),
+            main_preview_renderer: Renderer::new(),
+            main_preview_texture: None,
+            main_preview_for_theme: String::new(),
+        };
+        app.refresh_ports();
+        app.refresh_themes();
+        app.refresh_interfaces();
+        app.refresh_main_preview(ctx);
+        app
+    }
+
+    fn refresh_ports(&mut self) {
+        self.available_ports = serialport::available_ports()
+            .map(|ports| ports.into_iter().map(|p| p.port_name).collect())
+            .unwrap_or_default();
+    }
+
+    fn refresh_themes(&mut self) {
+        let root = config::resolve_theme_path("res/themes");
+        self.themes_root = root.clone();
+        let mut themes = Vec::new();
+        if let Ok(entries) = std::fs::read_dir(&root) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_dir() && path.join("theme.yaml").exists() {
+                    if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                        themes.push(name.to_string());
+                    }
+                }
+            }
+        }
+        themes.sort();
+        self.available_themes = themes;
+    }
+
+    fn refresh_interfaces(&mut self) {
+        let networks = sysinfo::Networks::new_with_refreshed_list();
+        let mut names: Vec<String> = networks.iter().map(|(name, _)| name.clone()).collect();
+        names.sort();
+        self.available_interfaces = names;
+    }
+
+    fn config_yaml_path(&self) -> PathBuf {
+        config::resolve_path("config.yaml")
+    }
+
+    fn theme_dir(&self) -> PathBuf {
+        self.themes_root.join(&self.theme)
+    }
+
+    fn theme_yaml_path(&self) -> PathBuf {
+        self.theme_dir().join("theme.yaml")
+    }
+
+    /// Rebuilds the small preview shown in the main window. Only called
+    /// on load / theme change / explicit refresh - not every frame.
+    fn refresh_main_preview(&mut self, ctx: &egui::Context) {
+        self.main_preview_for_theme = self.theme.clone();
+        let yaml_path = self.theme_yaml_path();
+        let Ok(text) = std::fs::read_to_string(&yaml_path) else {
+            self.main_preview_texture = None;
+            return;
+        };
+        let Ok(yaml) = serde_yaml::from_str::<serde_yaml::Value>(&text) else {
+            self.main_preview_texture = None;
+            return;
+        };
+        let mut elements = Vec::new();
+        let mut path_buf = Vec::new();
+        scan_elements(&yaml, &mut path_buf, &mut elements);
+
+        let theme_dir = self.theme_dir();
+        let bg_rel = node_at(&yaml, &["static_images".to_string(), "BACKGROUND".to_string()])
+            .and_then(|n| n.get("PATH"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+        let Some(bg_rel) = bg_rel else {
+            self.main_preview_texture = None;
+            return;
+        };
+        let Some(bg) = load_bg_image(&theme_dir.join(bg_rel)) else {
+            self.main_preview_texture = None;
+            return;
+        };
+
+        self.main_preview_renderer = Renderer::new();
+        load_theme_fonts(&mut self.main_preview_renderer, &theme_dir, &yaml);
+        let rendered = render_theme_preview(&mut self.main_preview_renderer, &bg, &yaml, &elements);
+        self.main_preview_texture = Some(load_texture_from_image(ctx, "main_preview", &rendered));
+    }
+
+    fn load_theme_yaml_editor(&mut self) {
+        let path = self.theme_yaml_path();
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                self.theme_yaml_text = text;
+                self.theme_yaml_status = format!("Loaded: {}", path.display());
+            }
+            Err(e) => {
+                self.theme_yaml_text.clear();
+                self.theme_yaml_status = format!("Load error ({}): {}", path.display(), e);
+            }
+        }
+    }
+
+    fn save_theme_yaml_editor(&mut self) {
+        if let Err(e) = serde_yaml::from_str::<serde_yaml::Value>(&self.theme_yaml_text) {
+            self.theme_yaml_status = format!("Invalid YAML, NOT saved: {}", e);
+            return;
+        }
+        let path = self.theme_yaml_path();
+        match std::fs::write(&path, &self.theme_yaml_text) {
+            Ok(()) => {
+                self.theme_yaml_status = format!("Saved: {}", path.display());
+                self.visual_editor.loaded = false;
+            }
+            Err(e) => self.theme_yaml_status = format!("Save error: {}", e),
+        }
+    }
+
+    fn load_visual_editor(&mut self) {
+        let yaml_path = self.theme_yaml_path();
+        let text = match std::fs::read_to_string(&yaml_path) {
+            Ok(t) => t,
+            Err(e) => {
+                self.visual_editor = VisualEditorState {
+                    status: format!("Load error ({}): {}", yaml_path.display(), e),
+                    ..Default::default()
+                };
+                return;
+            }
+        };
+        let value: serde_yaml::Value = match serde_yaml::from_str(&text) {
+            Ok(v) => v,
+            Err(e) => {
+                self.visual_editor = VisualEditorState {
+                    status: format!("YAML error: {}", e),
+                    ..Default::default()
+                };
+                return;
+            }
+        };
+
+        let mut elements = Vec::new();
+        let mut path_buf = Vec::new();
+        scan_elements(&value, &mut path_buf, &mut elements);
+
+        let theme_dir = self.theme_dir();
+        let bg_rel = node_at(&value, &["static_images".to_string(), "BACKGROUND".to_string()])
+            .and_then(|n| n.get("PATH"))
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string());
+
+        let mut bg_image = None;
+        let mut img_size = (320u32, 480u32);
+        if let Some(rel) = bg_rel {
+            if let Some(img) = load_bg_image(&theme_dir.join(rel)) {
+                img_size = (img.width(), img.height());
+                bg_image = Some(img);
+            }
+        }
+
+        let mut renderer = Renderer::new();
+        load_theme_fonts(&mut renderer, &theme_dir, &value);
+
+        let status = format!("{} element(s) found.", elements.len());
+        self.visual_editor = VisualEditorState {
+            loaded: true,
+            yaml: value,
+            elements,
+            selected: None,
+            bg_image,
+            canvas_texture: None,
+            preview_texture: None,
+            img_size,
+            status,
+            dirty: false,
+            renderer,
+        };
+    }
+
+    fn save_visual_editor(&mut self) {
+        if !self.visual_editor.loaded {
+            return;
+        }
+        let text = match serde_yaml::to_string(&self.visual_editor.yaml) {
+            Ok(t) => t,
+            Err(e) => {
+                self.visual_editor.status = format!("YAML generation error: {}", e);
+                return;
+            }
+        };
+        let path = self.theme_yaml_path();
+        match std::fs::write(&path, text) {
+            Ok(()) => {
+                self.visual_editor.status = format!("Saved: {}", path.display());
+                self.visual_editor.dirty = false;
+            }
+            Err(e) => self.visual_editor.status = format!("Save error: {}", e),
+        }
+    }
+
+    fn to_yaml(&self) -> String {
+        let units = if self.weather_units_metric { "metric" } else { "imperial" };
+        format!(
+            r#"---
+config:
+  # Set your COM port e.g. COM3 for Windows, /dev/ttyACM0 for Linux...
+  # Use AUTO for COM port auto-discovery
+  COM_PORT: "{com_port}"
+
+  # Theme to use (folder name under res/themes)
+  THEME: "{theme}"
+
+  # Network interfaces for NET stats. Leave empty "" to sum ALL interfaces.
+  ETH: "{eth}"
+  WLO: "{wlo}"
+
+  # Address used for ping/latency checks
+  PING: "{ping}"
+
+  # Weather location (set via the city search in the settings window)
+  # and units (metric/imperial)
+  WEATHER_LATITUDE: {weather_latitude}
+  WEATHER_LONGITUDE: {weather_longitude}
+  WEATHER_UNITS: "{units}"
+
+display:
+  # Display brightness percentage (0-100)
+  BRIGHTNESS: {brightness}
+
+  # Reverse display orientation: true/false
+  DISPLAY_REVERSE: {display_reverse}
+
+  # Reset display on startup: true/false (can change the COM port on some displays)
+  RESET_ON_STARTUP: {reset_on_startup}
+"#,
+            com_port = self.com_port,
+            theme = self.theme,
+            eth = self.eth,
+            wlo = self.wlo,
+            ping = self.ping,
+            weather_latitude = self.weather_latitude,
+            weather_longitude = self.weather_longitude,
+            units = units,
+            brightness = self.brightness,
+            display_reverse = self.display_reverse,
+            reset_on_startup = self.reset_on_startup,
+        )
+    }
+
+    fn save(&mut self) -> bool {
+        let path = self.config_yaml_path();
+        match std::fs::write(&path, self.to_yaml()) {
+            Ok(()) => {
+                self.status = format!("Saved: {}", path.display());
+                self.status_is_error = false;
+                true
+            }
+            Err(e) => {
+                self.status = format!("Save error: {}", e);
+                self.status_is_error = true;
+                false
+            }
+        }
+    }
+
+    fn launch_monitor(&mut self) {
+        let exe_name = if cfg!(windows) {
+            "mini-system-monitor.exe"
+        } else {
+            "mini-system-monitor"
+        };
+        let monitor_path = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(|d| d.join(exe_name)))
+            .unwrap_or_else(|| PathBuf::from(exe_name));
+
+        match Command::new(&monitor_path).spawn() {
+            Ok(_) => {
+                self.status = "Monitor started.".to_string();
+                self.status_is_error = false;
+            }
+            Err(e) => {
+                self.status = format!("Could not start monitor ({}): {}", monitor_path.display(), e);
+                self.status_is_error = true;
+            }
+        }
+    }
+
+    fn start_city_search(&mut self) {
+        let query = self.city_query.trim().to_string();
+        if query.is_empty() {
+            return;
+        }
+        let state = self.city_search.clone();
+        {
+            let mut s = state.lock().unwrap();
+            s.searching = true;
+            s.results.clear();
+            s.error = None;
+        }
+        thread::spawn(move || {
+            let result = search_cities(&query);
+            let mut s = state.lock().unwrap();
+            s.searching = false;
+            match result {
+                Ok(list) => s.results = list,
+                Err(e) => s.error = Some(e),
+            }
+        });
+    }
+}
+
+fn search_cities(query: &str) -> Result<Vec<CityResult>, String> {
+    let resp = ureq::get("https://geocoding-api.open-meteo.com/v1/search")
+        .query("name", query)
+        .query("count", "8")
+        .query("language", "en")
+        .query("format", "json")
+        .timeout(Duration::from_secs(8))
+        .call()
+        .map_err(|e| e.to_string())?;
+
+    let json: serde_json::Value = resp.into_json().map_err(|e| e.to_string())?;
+
+    let mut out = Vec::new();
+    if let Some(arr) = json.get("results").and_then(|v| v.as_array()) {
+        for item in arr {
+            let name = item.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if name.is_empty() {
+                continue;
+            }
+            out.push(CityResult {
+                name,
+                admin1: item.get("admin1").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                country: item.get("country").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                latitude: item.get("latitude").and_then(|v| v.as_f64()).unwrap_or(0.0),
+                longitude: item.get("longitude").and_then(|v| v.as_f64()).unwrap_or(0.0),
+            });
+        }
+    }
+    Ok(out)
+}
+
+
+
+fn field_label(ui: &mut egui::Ui, text: &str) {
+    ui.add_sized(
+        [150.0, 32.0],
+        egui::Label::new(egui::RichText::new(text).strong().color(TEXT_FAINT).size(13.0)),
+    );
+}
+
+struct ElemSnapshot {
+    idx: usize,
+    x: i64,
+    y: i64,
+    w: i64,
+    h: i64,
+    is_graph: bool,
+    label: String,
+}
+
+impl eframe::App for ConfigureApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        ctx.request_repaint_after(Duration::from_millis(200));
+
+        draw_new_configure_ui(ctx, self);
+    }
+}
+
+fn app_panel(ui: &mut egui::Ui, title: &str, subtitle: &str, width: f32, add_contents: impl FnOnce(&mut egui::Ui)) {
+    // `width` is the OUTER width the caller has allocated for this panel.
+    // The frame below adds its own inner margin, so the content area must be
+    // shrunk by that margin - otherwise the panel silently renders wider
+    // than the space its caller reserved for it (causing overlap with
+    // neighboring columns / scrollbars).
+    const MARGIN_X: f32 = 18.0;
+    const MARGIN_Y: f32 = 16.0;
+    let inner_width = (width - MARGIN_X * 2.0).max(0.0);
+
+    egui::Frame::none()
+        .fill(CARD)
+        .stroke(egui::Stroke::new(2.0_f32, ACCENT_DIM))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(MARGIN_X, MARGIN_Y))
+        .show(ui, |ui| {
+            ui.set_min_width(inner_width);
+            ui.set_max_width(inner_width);
+            ui.allocate_ui_with_layout(
+                egui::vec2(inner_width, 20.0),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.label(egui::RichText::new(title).strong().color(egui::Color32::WHITE).size(16.0));
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if !subtitle.is_empty() {
+                            ui.label(egui::RichText::new(subtitle).color(TEXT_FAINT).size(11.0));
+                        }
+                    });
+                },
+            );
+            ui.add_space(8.0);
+            add_contents(ui);
+        });
+}
+
+fn panel_field(ui: &mut egui::Ui, label: &str, add_content: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        let label_w = 160.0;
+        ui.allocate_ui_with_layout(egui::vec2(label_w, ui.available_height()), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            field_label(ui, label);
+        });
+        ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.available_height()), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            add_content(ui);
+        });
+    });
+    ui.add_space(4.0);
+}
+
+fn modern_button(ui: &mut egui::Ui, text: &str, width: f32) -> egui::Response {
+    let height = 32.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let fill = if response.is_pointer_button_down_on() {
+            egui::Color32::from_rgb(20, 25, 35)
+        } else if response.hovered() {
+            egui::Color32::from_rgb(40, 50, 60)
+        } else {
+            CARD_HI
+        };
+        let stroke = if response.hovered() || response.is_pointer_button_down_on() {
+            egui::Stroke::new(2.0_f32, ACCENT)
+        } else {
+            egui::Stroke::new(1.0_f32, BORDER)
+        };
+        ui.painter().rect(rect, 6.0, fill, stroke);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(13.0),
+            if response.hovered() { egui::Color32::WHITE } else { TEXT_DIM },
+        );
+    }
+    response
+}
+
+fn modern_button_filled(ui: &mut egui::Ui, text: &str, width: f32, fill_color: egui::Color32, text_color: egui::Color32) -> egui::Response {
+    let height = 32.0;
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let dark = egui::Color32::from_rgba_premultiplied(
+            fill_color.r().saturating_sub(15),
+            fill_color.g().saturating_sub(15),
+            fill_color.b().saturating_sub(15),
+            255,
+        );
+        let light = egui::Color32::from_rgba_premultiplied(
+            fill_color.r().saturating_add(25),
+            fill_color.g().saturating_add(25),
+            fill_color.b().saturating_add(25),
+            255,
+        );
+        let fill = if response.is_pointer_button_down_on() {
+            dark
+        } else if response.hovered() {
+            light
+        } else {
+            fill_color
+        };
+        let shadow = egui::Color32::from_rgba_unmultiplied(0, 0, 0, 60);
+        let shadow_rect = rect.expand2(egui::vec2(1.0, 1.5));
+        ui.painter().rect_filled(shadow_rect, 6.0, shadow);
+        ui.painter().rect(rect, 6.0, fill, egui::Stroke::new(1.0_f32, ACCENT));
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            text,
+            egui::FontId::proportional(13.0),
+            text_color,
+        );
+    }
+    response
+}
+
+fn modern_text_edit(ui: &mut egui::Ui, text: &mut String, width: f32) -> egui::Response {
+    let response = ui.add_sized([width, 32.0], egui::TextEdit::singleline(text).margin(egui::Margin::symmetric(12.0, 8.0)));
+    response
+}
+
+fn modern_checkbox(ui: &mut egui::Ui, checked: &mut bool, text: &str) -> egui::Response {
+    let icon_width = 20.0;
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(ui.available_width(), 32.0),
+        egui::Sense::click(),
+    );
+    if response.clicked() {
+        *checked = !*checked;
+        response.mark_changed();
+    }
+    if ui.is_rect_visible(rect) {
+        let text_color = if *checked { egui::Color32::WHITE } else { TEXT_FAINT };
+        let box_rect = egui::Rect::from_min_size(
+            egui::pos2(rect.left(), rect.center().y - icon_width / 2.0),
+            egui::vec2(icon_width, icon_width),
+        );
+
+        let fill = if *checked { ACCENT } else { CARD_HI };
+        let stroke = if *checked {
+            egui::Stroke::new(1.0_f32, ACCENT)
+        } else {
+            egui::Stroke::new(1.5_f32, BORDER)
+        };
+        ui.painter().rect(box_rect, 4.0, fill, stroke);
+
+        if *checked {
+            ui.painter().line_segment(
+                [
+                    egui::pos2(box_rect.left() + 4.0, box_rect.center().y + 1.0),
+                    egui::pos2(box_rect.left() + 8.0, box_rect.bottom() - 5.0),
+                ],
+                egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(13, 17, 23)),
+            );
+            ui.painter().line_segment(
+                [
+                    egui::pos2(box_rect.left() + 8.0, box_rect.bottom() - 5.0),
+                    egui::pos2(box_rect.right() - 3.0, box_rect.top() + 6.0),
+                ],
+                egui::Stroke::new(2.5_f32, egui::Color32::from_rgb(13, 17, 23)),
+            );
+        }
+
+        ui.painter().text(
+            egui::pos2(box_rect.right() + 10.0, rect.center().y),
+            egui::Align2::LEFT_CENTER,
+            text,
+            egui::FontId::proportional(13.0),
+            text_color,
+        );
+    }
+    response
+}
+
+fn modern_combobox<T: PartialEq + Clone>(
+    ui: &mut egui::Ui,
+    id_salt: &str,
+    selected: &mut T,
+    options: Vec<(T, String)>,
+    width: f32,
+) {
+    ui.scope(|ui| {
+        // Scoped to THIS ui only (via visuals_mut/spacing_mut) so it can
+        // never leak into - or compound across - other widgets drawn later
+        // in the same frame. The previous version called
+        // ctx().set_visuals()/set_style(), which mutate the app's GLOBAL
+        // style permanently; every combobox drawn after the first one then
+        // started from an already-altered style, and paddings/sizes kept
+        // growing, eventually pushing controls outside their allocated box.
+        let visuals = ui.visuals_mut();
+        visuals.widgets.inactive.bg_fill = CARD_HI;
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(2.0_f32, ACCENT_DIM);
+        visuals.widgets.inactive.rounding = egui::Rounding::same(4.0);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(40, 50, 60);
+        visuals.widgets.hovered.bg_stroke = egui::Stroke::new(2.0_f32, ACCENT);
+        visuals.widgets.active.bg_fill = egui::Color32::from_rgb(25, 30, 40);
+        visuals.widgets.active.bg_stroke = egui::Stroke::new(2.0_f32, ACCENT);
+        ui.spacing_mut().button_padding = egui::vec2(14.0, 7.0);
+
+        let selected_text = options.iter().find(|(v, _)| v == selected).map(|(_, t)| t.clone()).unwrap_or_default();
+        egui::ComboBox::from_id_salt(id_salt)
+            .selected_text(selected_text)
+            .width(width)
+            .show_ui(ui, |ui| {
+                for (val, text) in options {
+                    ui.selectable_value(selected, val, text);
+                }
+            });
+    });
+}
+
+fn modern_drag_value_i64(ui: &mut egui::Ui, value: &mut i64, range: std::ops::RangeInclusive<i64>, width: f32) -> egui::Response {
+    let response = ui.add_sized(
+        [width, 32.0],
+        egui::DragValue::new(value).range(range).speed(1.0),
+    );
+    response
+}
+
+fn modern_drag_value_f64(ui: &mut egui::Ui, value: &mut f64, range: std::ops::RangeInclusive<f64>, speed: f64, width: f32) -> egui::Response {
+    let response = ui.add_sized(
+        [width, 32.0],
+        egui::DragValue::new(value).range(range).speed(speed),
+    );
+    response
+}
+
+
+fn draw_new_configure_ui(ctx: &egui::Context, app: &mut ConfigureApp) {
+    egui::CentralPanel::default()
+        .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::symmetric(30.0, 20.0)))
+        .show(ctx, |ui| {
+            let right_padding = 14.0;
+            let total = ui.available_width();
+            let usable = total - right_padding;
+
+            ui.allocate_ui_with_layout(
+                egui::vec2(usable, 0.0),
+                egui::Layout::top_down(egui::Align::LEFT),
+                |ui| {
+                    egui::Frame::none()
+                        .fill(CARD)
+                        .stroke(egui::Stroke::new(2.0_f32, ACCENT_DIM))
+                        .rounding(egui::Rounding::same(8.0))
+                        .inner_margin(egui::Margin::symmetric(18.0, 12.0))
+                        .show(ui, |ui| {
+                            ui.horizontal(|ui| {
+                                let title_h = ui.text_style_height(&egui::TextStyle::Heading).max(24.0);
+                                let (dot_rect, _) = ui.allocate_exact_size(egui::vec2(12.0, title_h), egui::Sense::hover());
+                                ui.painter().circle_filled(dot_rect.center(), 6.0, ACCENT);
+                                ui.label(egui::RichText::new("MINI SYSTEM MONITOR").strong().color(TEXT_DIM).size(24.0));
+                                ui.add_space(12.0);
+                                ui.label(egui::RichText::new("CONFIGURATION").strong().color(ACCENT).size(14.0));
+                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                    status_dot(ui, OK, "ACTIVE");
+                                });
+                            });
+                        });
+                },
+            );
+
+            ui.add_space(10.0);
+            let preview_w = (usable * 0.36).max(200.0);
+            let column_gap = 16.0;
+            let settings_w = (usable - preview_w - column_gap).max(200.0);
+            ui.horizontal(|ui| {
+                ui.allocate_ui_with_layout(egui::vec2(preview_w.max(200.0), ui.available_height()), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    app_panel(ui, "DISPLAY PREVIEW", "", preview_w.max(200.0), |ui| {
+                        ui.vertical_centered(|ui| {
+                            egui::Frame::none()
+                                .fill(egui::Color32::from_rgb(18, 23, 28))
+                                .inner_margin(egui::Margin::same(14.0))
+                                .show(ui, |ui| {
+                                    if let Some(tex) = &app.main_preview_texture {
+                                        let max_h = 480.0;
+                                        let ratio = tex.size()[0] as f32 / tex.size()[1] as f32;
+                                        let sized = egui::load::SizedTexture::new(tex.id(), egui::vec2(max_h * ratio, max_h));
+                                        let _img_response = ui.add(egui::Image::from_texture(sized));
+                                    } else {
+                                        ui.add_sized([300.0, 420.0], egui::Label::new(
+                                            egui::RichText::new("Preview is not available").color(TEXT_FAINT),
+                                        ));
+                                    }
+                                });
+                            ui.add_space(12.0);
+                            ui.horizontal(|ui| {
+                                if ui.add_sized([140.0, 32.0], egui::Button::new("Refresh preview")).clicked() {
+                                    app.refresh_main_preview(ctx);
+                                }
+                                if ui.add_sized([140.0, 32.0], egui::Button::new("Open Editor").fill(ACCENT)).clicked() {
+                                    app.theme_editor_open = true;
+                                    app.visual_editor.loaded = false;
+                                }
+                            });
+                            ui.add_space(6.0);
+                            ui.label(egui::RichText::new(format!("Selected theme: {}", app.theme)).color(TEXT_FAINT).size(11.0));
+                        });
+                    });
+                });
+                ui.add_space(column_gap);
+                ui.allocate_ui_with_layout(egui::vec2(settings_w, ui.available_height()), egui::Layout::top_down(egui::Align::LEFT), |ui| {
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                        .show(ui, |ui| {
+                        // With solid (non-floating) scroll bars, egui already shrinks
+                        // this ui's available width by the bar's own width/margins, so
+                        // reading it here (rather than guessing a fixed offset) is what
+                        // keeps panel content from ever running under the scroll bar.
+                        let panel_width = ui.available_width();
+                        ui.set_min_width(panel_width);
+                        ui.set_max_width(panel_width);
+                        app_panel(ui, "CONNECTION", "Choose the screen connection", panel_width, |ui| {
+                            panel_field(ui, "COM port", |ui| {
+                                let mut opts = vec![("AUTO".to_string(), "AUTO".to_string())];
+                                for port in &app.available_ports {
+                                    opts.push((port.clone(), port.clone()));
+                                }
+                                modern_combobox(ui, "new_com_port", &mut app.com_port, opts, ui.available_width());
+                            });
+                        });
+
+                        ui.add_space(8.0);
+                        app_panel(ui, "DISPLAY", "Theme and device preferences", panel_width, |ui| {
+                            panel_field(ui, "Theme", |ui| {
+                                ui.horizontal(|ui| {
+                                    let previous = app.theme.clone();
+                                    let opts = app.available_themes.iter().map(|t| (t.clone(), t.clone())).collect();
+                                    modern_combobox(ui, "new_theme", &mut app.theme, opts, 160.0);
+                                    if modern_button(ui, "Reload", 72.0).clicked() {
+                                        app.refresh_themes();
+                                    }
+                                    if previous != app.theme {
+                                        app.visual_editor.loaded = false;
+                                        app.refresh_main_preview(ctx);
+                                    }
+                                });
+                            });
+                            panel_field(ui, "Brightness", |ui| {
+                                let mut b = app.brightness as i64;
+                                modern_drag_value_i64(ui, &mut b, 0..=100, ui.available_width());
+                                app.brightness = b as u8;
+                            });
+                            panel_field(ui, "Flip display", |ui| {
+                                modern_checkbox(ui, &mut app.display_reverse, "Enabled");
+                            });
+                            panel_field(ui, "Reset at startup", |ui| {
+                                modern_checkbox(ui, &mut app.reset_on_startup, "Enabled");
+                            });
+                        });
+
+                        ui.add_space(8.0);
+                        app_panel(ui, "NETWORK", "Interfaces used for traffic readings", panel_width, |ui| {
+                            panel_field(ui, "Ethernet interface", |ui| {
+                                let mut opts = vec![(String::new(), "Auto".to_string())];
+                                for interface in &app.available_interfaces {
+                                    opts.push((interface.clone(), interface.clone()));
+                                }
+                                modern_combobox(ui, "new_eth", &mut app.eth, opts, ui.available_width());
+                            });
+                            panel_field(ui, "Wi-Fi interface", |ui| {
+                                let mut opts = vec![(String::new(), "Auto".to_string())];
+                                for interface in &app.available_interfaces {
+                                    opts.push((interface.clone(), interface.clone()));
+                                }
+                                modern_combobox(ui, "new_wlo", &mut app.wlo, opts, ui.available_width());
+                            });
+                            panel_field(ui, "Ping address", |ui| {
+                                modern_text_edit(ui, &mut app.ping, ui.available_width());
+                            });
+                        });
+
+                        ui.add_space(8.0);
+                        app_panel(ui, "WEATHER", "Location and unit preferences", panel_width, |ui| {
+                            panel_field(ui, "City search", |ui| {
+                                let text_w = (ui.available_width() - 72.0 - ui.spacing().item_spacing.x).max(50.0);
+                                let response = modern_text_edit(ui, &mut app.city_query, text_w);
+                                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                                if modern_button(ui, "Search", 72.0).clicked() || enter {
+                                    app.start_city_search();
+                                }
+                            });
+
+                            let (searching, results, error) = {
+                                let state = app.city_search.lock().unwrap();
+                                (state.searching, state.results.clone(), state.error.clone())
+                            };
+                            if searching {
+                                panel_field(ui, "Status", |ui| {
+                                    ui.label(egui::RichText::new("Searching...").color(TEXT_FAINT));
+                                });
+                            }
+                            if let Some(error) = error {
+                                panel_field(ui, "Error", |ui| {
+                                    ui.colored_label(ERROR, error);
+                                });
+                            }
+                            if !results.is_empty() {
+                                for result in results {
+                                    let label = if result.admin1.is_empty() {
+                                        format!("{}, {}", result.name, result.country)
+                                    } else {
+                                        format!("{}, {}, {}", result.name, result.admin1, result.country)
+                                    };
+                                    panel_field(ui, "Result", |ui| {
+                                        if ui.add_sized([ui.available_width(), 24.0], egui::Button::new(&label)).clicked() {
+                                            app.weather_latitude = result.latitude;
+                                            app.weather_longitude = result.longitude;
+                                            app.weather_location_label = label;
+                                            app.city_search.lock().unwrap().results.clear();
+                                            app.city_query.clear();
+                                        }
+                                    });
+                                }
+                            }
+                            ui.add_space(8.0);
+                            if !app.weather_location_label.is_empty() {
+                                panel_field(ui, "Location", |ui| {
+                                    ui.label(egui::RichText::new(app.weather_location_label.clone()).strong().color(OK));
+                                });
+                                ui.add_space(12.0);
+                            }
+                            panel_field(ui, "Units", |ui| {
+                                ui.horizontal(|ui| {
+                                    ui.selectable_value(&mut app.weather_units_metric, true, "Celsius");
+                                    ui.selectable_value(&mut app.weather_units_metric, false, "Fahrenheit");
+                                });
+                            });
+                            panel_field(ui, "Manual", |ui| {
+                                modern_checkbox(ui, &mut app.show_manual_coords, "Set coordinates manually");
+                            });
+                            if app.show_manual_coords {
+                                panel_field(ui, "Latitude", |ui| {
+                                    modern_drag_value_f64(ui, &mut app.weather_latitude, -90.0..=90.0, 0.01, ui.available_width());
+                                });
+                                ui.add_space(12.0);
+                                panel_field(ui, "Longitude", |ui| {
+                                    modern_drag_value_f64(ui, &mut app.weather_longitude, -180.0..=180.0, 0.01, ui.available_width());
+                                });
+                            }
+                        });
+
+                        ui.add_space(8.0);
+                        app_panel(ui, "SYSTEM CONTROL", "Apply or reload settings", panel_width, |ui| {
+                            panel_field(ui, "Actions", |ui| {
+                                ui.horizontal(|ui| {
+                                    if modern_button(ui, "Refresh", 72.0).clicked() {
+                                        app.refresh_ports();
+                                        app.refresh_interfaces();
+                                    }
+                                    if modern_button(ui, "Save", 60.0).clicked() {
+                                        app.save();
+                                    }
+                                    if modern_button_filled(ui, "Save & Start", 112.0, ACCENT, egui::Color32::from_rgb(13, 17, 23)).clicked() {
+                                        if app.save() {
+                                            app.launch_monitor();
+                                        }
+                                    }
+                                });
+                            });
+                            if !app.status.is_empty() {
+                                let color = if app.status_is_error { ERROR } else { OK };
+                                ui.add_space(6.0);
+                                ui.label(egui::RichText::new(&app.status).strong().color(color));
+                            }
+                        });
+                    });
+                });
+            });
+        });
+
+    if app.theme_editor_open {
+        let theme_name = app.theme.clone();
+        ctx.show_viewport_immediate(
+            egui::ViewportId::from_hash_of("new_theme_editor_viewport"),
+            egui::ViewportBuilder::default()
+                .with_title(format!("Theme editor - {}", theme_name))
+                .with_inner_size([1160.0, 840.0])
+                .with_min_inner_size([1000.0, 720.0]),
+            |ctx, _| {
+                egui::CentralPanel::default()
+                    .frame(egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(20.0)))
+                    .show(ctx, |ui| draw_new_theme_editor(ui, ctx, app));
+                if ctx.input(|input| input.viewport().close_requested()) {
+                    app.theme_editor_open = false;
+                }
+            },
+        );
+    }
+}
+
+fn draw_new_theme_editor(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ConfigureApp) {
+    // --- header ---
+    egui::Frame::none()
+        .fill(CARD)
+        .stroke(egui::Stroke::new(2.0_f32, ACCENT_DIM))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(16.0, 10.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(egui::RichText::new("THEME EDITOR").strong().color(TEXT_DIM).size(18.0));
+                ui.add_space(10.0);
+                ui.label(egui::RichText::new(&app.theme).strong().color(ACCENT).size(13.0));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if modern_button(ui, "Close", 64.0).clicked() {
+                        app.theme_editor_open = false;
+                    }
+                });
+            });
+        });
+
+    // --- tab bar ---
+    egui::Frame::none()
+        .fill(CARD)
+        .stroke(egui::Stroke::new(2.0_f32, ACCENT_DIM))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(14.0, 5.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                for (tab, label) in &[(EditorTab::Visual, "Layout editor"), (EditorTab::Raw, "YAML editor")] {
+                    let active = app.editor_tab == *tab;
+                    let fill = if active { ACCENT_DIM } else { egui::Color32::TRANSPARENT };
+                    let stroke = if active { egui::Stroke::new(1.0_f32, ACCENT) } else { egui::Stroke::new(1.0_f32, BORDER) };
+                    let txt_color = if active { egui::Color32::WHITE } else { TEXT_DIM };
+                    if ui.add_sized([140.0, 28.0], egui::Button::new(egui::RichText::new(*label).size(13.0).color(txt_color)).fill(fill).stroke(stroke).rounding(egui::Rounding::same(4.0))).clicked() { app.editor_tab = *tab; }
+                    ui.add_space(4.0);
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    match app.editor_tab {
+                        EditorTab::Visual => {
+                            if app.visual_editor.dirty {
+                                ui.label(egui::RichText::new("Unsaved changes").strong().color(WARN_COLOR).size(11.0));
+                                ui.add_space(10.0);
+                            }
+                            if modern_button_filled(ui, "Save layout", 120.0, ACCENT, egui::Color32::from_rgb(13, 17, 23)).clicked() {
+                                app.save_visual_editor();
+                            }
+                            ui.add_space(6.0);
+                            if modern_button(ui, "Reload", 90.0).clicked() {
+                                app.visual_editor.loaded = false;
+                            }
+                        }
+                        EditorTab::Raw => {
+                            if modern_button_filled(ui, "Save", 100.0, ACCENT, egui::Color32::from_rgb(13, 17, 23)).clicked() {
+                                app.save_theme_yaml_editor();
+                            }
+                            ui.add_space(6.0);
+                            if modern_button(ui, "Load", 100.0).clicked() {
+                                app.load_theme_yaml_editor();
+                            }
+                        }
+                    }
+                });
+            });
+        });
+
+    // --- content: use remaining space ---
+    match app.editor_tab {
+        EditorTab::Visual => {
+            if !app.visual_editor.loaded {
+                app.load_visual_editor();
+            }
+            draw_new_visual_editor(ui, ctx, app);
+        }
+        EditorTab::Raw => {
+            egui::Frame::none()
+                .fill(CARD)
+                .stroke(egui::Stroke::new(2.0_f32, ACCENT_DIM))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(6.0))
+                .show(ui, |ui| {
+                    let avail = ui.available_height();
+                    let status_h = if app.theme_yaml_status.is_empty() { 0.0 } else { 22.0 };
+                    let edit_h = (avail - status_h - 4.0).max(120.0);
+                    egui::ScrollArea::vertical()
+                        .auto_shrink([false, false])
+                        .max_height(edit_h)
+                        .show(ui, |ui| {
+                            ui.add(
+                                egui::TextEdit::multiline(&mut app.theme_yaml_text)
+                                    .font(egui::TextStyle::Monospace)
+                                    .code_editor(),
+                            );
+                        });
+                    if !app.theme_yaml_status.is_empty() {
+                        ui.add_space(4.0);
+                        let color = if app.theme_yaml_status.to_lowercase().contains("error") { ERROR } else { OK };
+                        ui.label(egui::RichText::new(&app.theme_yaml_status).strong().color(color).size(11.0));
+                    }
+                });
+        }
+    }
+}
+
+fn draw_new_visual_editor(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ConfigureApp) {
+    let (img_w, img_h) = app.visual_editor.img_size;
+
+    // Previously the preview image was scaled to a fixed 280px WIDTH only,
+    // with no matching height limit. For a background image taller/more
+    // narrow than the common 320x480 asset, that could ask for a panel
+    // taller than the window actually had room for - the window/column
+    // clip rect then silently cut the bottom off the rendered image,
+    // which is exactly the "purple at the top, plain black below, bars
+    // cut off" glitch that was reported. Constraining by BOTH width and
+    // available height (like `object-fit: contain`) guarantees the whole
+    // image is always drawn, regardless of the theme's image dimensions.
+    const CHROME_PER_PANEL: f32 = 70.0; // app_panel title + separator + margins
+    const FOOTNOTE_H: f32 = 40.0; // shared caption below the row
+    let max_h_by_width = 280.0_f32;
+    let max_h_by_avail = (ui.available_height() - CHROME_PER_PANEL - FOOTNOTE_H).max(120.0);
+    let scale = (max_h_by_width / img_w.max(1) as f32)
+        .min(max_h_by_avail / img_h.max(1) as f32);
+    let disp = egui::vec2(img_w as f32 * scale, img_h as f32 * scale);
+
+    let saved_x = ui.spacing().item_spacing.x;
+    ui.spacing_mut().item_spacing.x = 5.0;
+    ui.columns(3, |columns| {
+        let col_w = columns[0].available_width();
+        app_panel(&mut columns[0], "CANVAS", "Select or drag an element", col_w, |ui| {
+            ui.set_min_height(disp.y + 20.0);
+            draw_canvas(ui, ctx, app, disp);
+        });
+
+        app_panel(&mut columns[1], "LIVE PREVIEW", "Rendered result", col_w, |ui| {
+            ui.set_min_height(disp.y + 20.0);
+            draw_live_preview(ui, ctx, app, disp);
+        });
+
+        app_panel(&mut columns[2], "ELEMENT SETTINGS", "Selected item properties", col_w, |ui| {
+            egui::Frame::none().inner_margin(egui::Margin::same(8.0)).show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(disp.y + 50.0)
+                    .auto_shrink([true, false])
+                    .show(ui, |ui| draw_properties_panel(ui, app));
+            });
+        });
+    });
+    ui.spacing_mut().item_spacing.x = saved_x;
+
+    ui.add_space(8.0);
+    ui.label(
+        egui::RichText::new("Values without a fixed TEXT (CPU %, temperatures, clock, etc.) show \
+             representative sample data here - actual numbers come from live sensors on the real screen.")
+            .color(TEXT_FAINT)
+            .small(),
+    );
+}
+
+fn draw_canvas(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ConfigureApp, disp: egui::Vec2) {
+    let (img_w, _img_h) = app.visual_editor.img_size;
+    let scale = disp.x / img_w.max(1) as f32;
+
+    if app.visual_editor.canvas_texture.is_none() {
+        if let Some(bg) = &app.visual_editor.bg_image {
+            app.visual_editor.canvas_texture = Some(load_texture_from_image(ctx, "theme_canvas_bg", bg));
+        }
+    }
+
+    let (rect, _bg_resp) = ui.allocate_exact_size(disp, egui::Sense::hover());
+
+    if let Some(tex) = &app.visual_editor.canvas_texture {
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+    } else {
+        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(28));
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "no background image",
+            egui::FontId::default(),
+            TEXT_DIM,
+        );
+    }
+    ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, ACCENT_DIM));
+
+    let mut snapshots: Vec<ElemSnapshot> = Vec::new();
+    for (idx, path) in app.visual_editor.elements.iter().enumerate() {
+        if let Some(node) = node_at(&app.visual_editor.yaml, path) {
+            let x = node.get("X").and_then(|v| v.as_i64()).unwrap_or(0);
+            let y = node.get("Y").and_then(|v| v.as_i64()).unwrap_or(0);
+            let w = node.get("WIDTH").and_then(|v| v.as_i64()).unwrap_or(0);
+            let h = node.get("HEIGHT").and_then(|v| v.as_i64()).unwrap_or(0);
+            let is_graph = node.get("WIDTH").is_some() && node.get("HEIGHT").is_some() && node.get("PATH").is_none();
+            let label = path.last().cloned().unwrap_or_default();
+            snapshots.push(ElemSnapshot { idx, x, y, w, h, is_graph, label });
+        }
+    }
+
+    let mut pending_move: Option<(usize, i64, i64)> = None;
+    let mut pending_select: Option<usize> = None;
+
+    for s in &snapshots {
+        let selected = app.visual_editor.selected == Some(s.idx);
+        let color = if selected { ACCENT } else { ACCENT_DIM };
+        let sx = rect.min.x + s.x as f32 * scale;
+        let sy = rect.min.y + s.y as f32 * scale;
+
+        let hit_rect = if s.is_graph {
+            let gw = (s.w as f32 * scale).max(6.0);
+            let gh = (s.h as f32 * scale).max(6.0);
+            let r = egui::Rect::from_min_size(egui::pos2(sx, sy), egui::vec2(gw, gh));
+            ui.painter().rect_stroke(r, 2.0, egui::Stroke::new(if selected { 2.0_f32 } else { 1.0_f32 }, color));
+            r
+        } else {
+            ui.painter().circle_filled(egui::pos2(sx, sy), 5.0, color);
+            if selected {
+                ui.painter().circle_stroke(egui::pos2(sx, sy), 8.0, egui::Stroke::new(1.5_f32, egui::Color32::WHITE));
+            }
+            egui::Rect::from_center_size(egui::pos2(sx, sy), egui::vec2(16.0, 16.0))
+        };
+
+        if selected {
+            ui.painter().text(
+                egui::pos2(hit_rect.max.x + 4.0, hit_rect.min.y),
+                egui::Align2::LEFT_TOP,
+                &s.label,
+                egui::FontId::monospace(10.0),
+                egui::Color32::WHITE,
+            );
+        }
+
+        let id = ui.id().with(("theme_elem", s.idx));
+        let resp = ui.interact(hit_rect, id, egui::Sense::click_and_drag());
+        if resp.dragged() {
+            let d = resp.drag_delta();
+            let nx = s.x + (d.x / scale).round() as i64;
+            let ny = s.y + (d.y / scale).round() as i64;
+            pending_move = Some((s.idx, nx.max(0), ny.max(0)));
+        }
+        if resp.clicked() {
+            pending_select = Some(s.idx);
+        }
+    }
+
+    if let Some(idx) = pending_select {
+        app.visual_editor.selected = Some(idx);
+    }
+    if let Some((idx, nx, ny)) = pending_move {
+        if let Some(path) = app.visual_editor.elements.get(idx).cloned() {
+            set_field_i64(&mut app.visual_editor.yaml, &path, "X", nx);
+            set_field_i64(&mut app.visual_editor.yaml, &path, "Y", ny);
+            app.visual_editor.dirty = true;
+            app.visual_editor.selected = Some(idx);
+        }
+    }
+}
+
+/// Renders the theme (via the shared Renderer, real fonts/colors) every
+/// time this is drawn - cheap enough at this size/refresh rate, and
+/// gives genuinely "live" feedback as you edit.
+fn draw_live_preview(ui: &mut egui::Ui, ctx: &egui::Context, app: &mut ConfigureApp, disp: egui::Vec2) {
+    if let Some(bg) = app.visual_editor.bg_image.clone() {
+        let elements = app.visual_editor.elements.clone();
+        let rendered = render_theme_preview(&mut app.visual_editor.renderer, &bg, &app.visual_editor.yaml, &elements);
+        let color_image = egui::ColorImage::from_rgb(
+            [rendered.width() as usize, rendered.height() as usize],
+            rendered.as_raw(),
+        );
+        // Update the existing texture in place (rather than allocating a new
+        // GPU texture handle every single frame) so repeatedly-edited themes
+        // render smoothly instead of via a churn of freshly-uploaded textures.
+        match app.visual_editor.preview_texture.as_mut() {
+            Some(tex) => tex.set(color_image, egui::TextureOptions::LINEAR),
+            None => {
+                app.visual_editor.preview_texture =
+                    Some(ctx.load_texture("theme_live_preview", color_image, egui::TextureOptions::LINEAR));
+            }
+        }
+        let tex = app.visual_editor.preview_texture.as_ref().unwrap();
+        let (rect, _) = ui.allocate_exact_size(disp, egui::Sense::hover());
+        ui.painter().image(
+            tex.id(),
+            rect,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
+            egui::Color32::WHITE,
+        );
+        ui.painter().rect_stroke(rect, 4.0, egui::Stroke::new(1.0_f32, ACCENT_DIM));
+    } else {
+        let (rect, _) = ui.allocate_exact_size(disp, egui::Sense::hover());
+        ui.painter().rect_filled(rect, 4.0, egui::Color32::from_gray(28));
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "no background image",
+            egui::FontId::default(),
+            TEXT_DIM,
+        );
+    }
+}
+
+fn draw_properties_panel(ui: &mut egui::Ui, app: &mut ConfigureApp) {
+    ui.set_min_height(300.0);
+
+    ui.add_space(5.0);
+    ui.label(egui::RichText::new("PROPERTIES").strong().color(egui::Color32::WHITE).size(12.0));
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(8.0);
+
+    let Some(idx) = app.visual_editor.selected else {
+        ui.add_space(8.0);
+        ui.label(egui::RichText::new("Select an element on the canvas to edit it.").color(TEXT_FAINT).small());
+        ui.add_space(8.0);
+        return;
+    };
+    let Some(path) = app.visual_editor.elements.get(idx).cloned() else {
+        return;
+    };
+
+    ui.label(egui::RichText::new(path.join("\n› ")).strong().color(egui::Color32::WHITE));
+    ui.add_space(8.0);
+
+    let theme_dir = app.theme_dir();
+    let available_fonts = scan_available_fonts(&theme_dir);
+
+    if let Some(node) = node_at(&app.visual_editor.yaml, &path) {
+        let mut x = node.get("X").and_then(|v| v.as_i64()).unwrap_or(0);
+        let mut y = node.get("Y").and_then(|v| v.as_i64()).unwrap_or(0);
+        let width = node.get("WIDTH").and_then(|v| v.as_i64());
+        let height = node.get("HEIGHT").and_then(|v| v.as_i64());
+        let font_size = node.get("FONT_SIZE").and_then(|v| v.as_f64());
+        let text_val = node.get("TEXT").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let anchor_val = node.get("ANCHOR").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let font_val = node.get("FONT").and_then(|v| v.as_str()).map(|s| s.to_string());
+        let font_color = node.get("FONT_COLOR").and_then(|v| v.as_str()).map(parse_rgb_csv);
+        let bar_color = node.get("BAR_COLOR").and_then(|v| v.as_str()).map(parse_rgb_csv);
+
+        egui::Grid::new("elem_props").num_columns(2).spacing([10.0, 12.0]).show(ui, |ui| {
+            field_label(ui, "X");
+            if modern_drag_value_i64(ui, &mut x, -9999..=9999, 140.0).changed() {
+                set_field_i64(&mut app.visual_editor.yaml, &path, "X", x);
+                app.visual_editor.dirty = true;
+            }
+            ui.end_row();
+
+            field_label(ui, "Y");
+            if modern_drag_value_i64(ui, &mut y, -9999..=9999, 140.0).changed() {
+                set_field_i64(&mut app.visual_editor.yaml, &path, "Y", y);
+                app.visual_editor.dirty = true;
+            }
+            ui.end_row();
+
+            if let Some(w0) = width {
+                let mut w = w0;
+                field_label(ui, "Width");
+                if modern_drag_value_i64(ui, &mut w, 1..=320, 140.0).changed() {
+                    set_field_i64(&mut app.visual_editor.yaml, &path, "WIDTH", w);
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+            if let Some(h0) = height {
+                let mut h = h0;
+                field_label(ui, "Height");
+                if modern_drag_value_i64(ui, &mut h, 1..=480, 140.0).changed() {
+                    set_field_i64(&mut app.visual_editor.yaml, &path, "HEIGHT", h);
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+
+            if let Some(fs) = font_size {
+                let mut fsz = fs as i64;
+                field_label(ui, "Font size");
+                if modern_drag_value_i64(ui, &mut fsz, 6..=96, 140.0).changed() {
+                    set_field_i64(&mut app.visual_editor.yaml, &path, "FONT_SIZE", fsz);
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+
+            if let Some(mut rgb) = font_color {
+                field_label(ui, "Text color");
+                let mut arr = [rgb.0[0], rgb.0[1], rgb.0[2]];
+                if egui::color_picker::color_edit_button_srgb(ui, &mut arr).changed() {
+                    rgb = Rgb(arr);
+                    set_field_str(&mut app.visual_editor.yaml, &path, "FONT_COLOR", &rgb_to_csv(arr));
+                    let _ = rgb;
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+
+            if let Some(rgb) = bar_color {
+                field_label(ui, "Bar color");
+                let mut arr = [rgb.0[0], rgb.0[1], rgb.0[2]];
+                if egui::color_picker::color_edit_button_srgb(ui, &mut arr).changed() {
+                    set_field_str(&mut app.visual_editor.yaml, &path, "BAR_COLOR", &rgb_to_csv(arr));
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+
+            if let Some(font) = font_val {
+                let mut f = font;
+                field_label(ui, "Font");
+                let mut opts = Vec::new();
+                for opt in &available_fonts {
+                    let display_name = opt.split(&['/', '\\'][..]).last().unwrap_or(opt).to_string();
+                    opts.push((opt.clone(), display_name));
+                }
+                let original_f = f.clone();
+                modern_combobox(ui, "elem_font", &mut f, opts, 140.0);
+                if f != original_f {
+                    set_field_str(&mut app.visual_editor.yaml, &path, "FONT", &f);
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+
+            if let Some(anchor) = anchor_val {
+                let mut a = anchor;
+                field_label(ui, "Anchor");
+                let opts: Vec<(String, String)> = ["lt", "mt", "rt", "lm", "mm", "rm", "lb", "mb", "rb"]
+                    .iter()
+                    .map(|&opt| (opt.to_string(), opt.to_string()))
+                    .collect();
+                let original_a = a.clone();
+                modern_combobox(ui, "elem_anchor", &mut a, opts, 140.0);
+                if a != original_a {
+                    set_field_str(&mut app.visual_editor.yaml, &path, "ANCHOR", &a);
+                    app.visual_editor.dirty = true;
+                }
+                ui.end_row();
+            }
+        });
+
+        if let Some(t) = text_val {
+            ui.add_space(15.0);
+            ui.separator();
+            ui.add_space(10.0);
+            field_label(ui, "Text");
+            let mut tv = t;
+            if modern_text_edit(ui, &mut tv, 240.0).changed() {
+                set_field_str(&mut app.visual_editor.yaml, &path, "TEXT", &tv);
+                app.visual_editor.dirty = true;
+            }
+        }
+    }
+}

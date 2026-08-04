@@ -1,0 +1,28 @@
+[package]
+name = "configure-app"
+version = "0.1.0"
+edition = "2021"
+description = "Settings & theme editor for mini-system-monitor"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# Reuses the SAME config loading, Theme model, and Renderer the real
+# monitor daemon uses, so previews here are pixel-accurate and there's
+# no second copy of the yaml-parsing logic to keep in sync.
+# NOTE: the key here must match the [package] name in the root
+# Cargo.toml ("mini-system-monitor", with a hyphen) - Cargo path
+# dependencies resolve by package name, not by the [lib] crate name
+# (which uses an underscore and is only what you `use` in Rust code).
+mini-system-monitor = { path = "../.." }
+
+tauri = { version = "2", features = [] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+anyhow = "1"
+base64 = "0.22"
+serialport = "4.3"
+sysinfo = { version = "0.33", features = ["network"] }
+ureq = { version = "2", features = ["json"] }
