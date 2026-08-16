@@ -364,6 +364,34 @@ fn alloc_console() {
 #[cfg(not(windows))]
 fn alloc_console() {}
 
+/// Tek instance guvencesi: monitor zaten calisiyorsa bu yeni process
+/// hicbir is yapmadan kapanir. Task Scheduler bazen cift calistirir
+/// (biri Task Scheduler'dan, biri elle/task tekrar tetiklenirse) - iki
+/// process ayni COM portunu kapmaya calisinca biri kaybeder ve ekran
+/// bos kalir. Named mutex sayesinde her zaman yalnizca bir monitor
+/// ayakta kalir. Mutex tutamacini kapatmak istemedigimiz icin process
+/// boyunca acik tutulur (bilincli sizinti, process zaten tekil).
+#[cfg(windows)]
+fn ensure_single_instance() {
+    use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, HANDLE};
+    use windows_sys::Win32::System::Threading::CreateMutexW;
+    use std::os::windows::ffi::OsStrExt;
+    let name: Vec<u16> = std::ffi::OsStr::new("Local\\MiniSystemMonitor_SingleInstance")
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    unsafe {
+        let handle: HANDLE = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
+        if !handle.is_null()
+            && windows_sys::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS
+        {
+            std::process::exit(0);
+        }
+    }
+}
+#[cfg(not(windows))]
+fn ensure_single_instance() {}
+
 /// Lightweight, tolerant peek at config.yaml's DISPLAY.SHOW_CONSOLE -
 /// deliberately independent of the strict `AppConfig::load` used by
 /// `run()`, so a missing/broken config file just means "console stays
@@ -380,6 +408,7 @@ fn should_show_console() -> bool {
 }
 
 fn main() {
+    ensure_single_instance();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,
@@ -459,41 +488,59 @@ fn run() -> Result<()> {
 
     let theme_renderer = ThemeRenderer::new(theme);
 
-    let com_port = match cfg.config.com_port.as_deref() {
-        Some("AUTO") | None => match LcdComm::auto_detect() {
-            Ok(p) => {
-                log::info!("COM port: {}", p);
-                p
-            }
-            Err(_) => {
-                log::warn!("Auto-detect failed, trying COM3");
-                "COM3".to_string()
-            }
-        },
-        Some(p) => p.to_string(),
-    };
+    // LCD baglantisini kur. Startup'ta (Task Scheduler'dan gelen logon
+    // tetiklemeli baslatma) USB ekran bazen gec enumerate oluyor, yani
+    // port listesinde hemen gorunmuyor. Tek denemede vazgecmek yerine
+    // ~60 saniye boyunca her 4 saniyede bir yeniden denenir; ekran
+    // gelinceye kadar monitor hazir bekler. "Bazen calisiyor bazen
+    // calismiyor" sorununun asil nedeni bu yaristi.
+    let deadline = Instant::now() + Duration::from_secs(60);
+    let mut display: Option<LcdComm> = None;
+    let mut last_err = String::from("unknown");
+    while Instant::now() < deadline {
+        let com_port = match cfg.config.com_port.as_deref() {
+            Some("AUTO") | None => match LcdComm::auto_detect() {
+                Ok(p) => {
+                    log::info!("COM port: {}", p);
+                    p
+                }
+                Err(e) => {
+                    last_err = format!("auto-detect: {}", e);
+                    log::warn!("{} (retrying)", last_err);
+                    thread::sleep(Duration::from_secs(4));
+                    continue;
+                }
+            },
+            Some(p) => p.to_string(),
+        };
 
-    let display = match LcdComm::new(&com_port) {
-        Ok(d) => {
-            // Eskiden parlaklik hep 20'de SABIT kodluydu - config.yaml'daki
-            // BRIGHTNESS degeri hicbir zaman okunmuyordu.
-            let brightness = cfg.display.brightness.unwrap_or(20);
-            if let Err(e) = d.initialize(brightness) {
-                log::error!("LCD init error (continuing): {}", e);
+        let brightness = cfg.display.brightness.unwrap_or(20);
+        match LcdComm::new(&com_port) {
+            Ok(d) => {
+                if let Err(e) = d.initialize(brightness) {
+                    log::error!("LCD init error (continuing): {}", e);
+                }
+                display = Some(d);
+                break;
             }
-            Some(d)
+            Err(e) => {
+                last_err = e.to_string();
+                log::warn!("{} (retrying)", last_err);
+                thread::sleep(Duration::from_secs(4));
+            }
         }
-        Err(e) => {
-            log::error!("LCD connection error (continuing, debug frame will be saved): {}", e);
-            None
-        }
-    };
-
-    if display.is_none() {
-        log::error!("No LCD connection, exiting");
-        return Err(anyhow::anyhow!("Could not connect to LCD. COM port: {}", com_port));
     }
-    let display = display.unwrap();
+
+    let display = match display {
+        Some(d) => d,
+        None => {
+            log::error!("No LCD connection, exiting (last error: {})", last_err);
+            return Err(anyhow::anyhow!(
+                "Could not connect to LCD. Last error: {}",
+                last_err
+            ));
+        }
+    };
 
     // Sistem tepsisi simgesi ("Ayarlar" -> configure.exe acar, "Cikis"
     // -> ekrani kapatip programi sonlandirir). Basarisiz olursa program

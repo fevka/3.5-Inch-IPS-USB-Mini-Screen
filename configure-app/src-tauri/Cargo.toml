@@ -26,3 +26,4 @@ base64 = "0.22"
 serialport = "4.3"
 sysinfo = { version = "0.33", features = ["network"] }
 ureq = { version = "2", features = ["json"] }
+image = "0.25"

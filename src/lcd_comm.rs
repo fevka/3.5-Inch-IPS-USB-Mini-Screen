@@ -29,20 +29,17 @@ pub struct LcdComm {
 impl LcdComm {
     pub fn new(com_port: &str) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<LcdCommand>();
-        let port_name = com_port.to_string();
+
+        // Portu SENKRON ac. Eski kod portu ayri bir thread icinde
+        // sessizce aciyordu; port acilamazsa program yine de "baglandim"
+        // saniyor, ekran bos kaliyordu. Artik acilamazsa Err doner ve
+        // cagiran taraf (main.rs) retry/exit kararini kendisi verir.
+        let mut port = serialport::new(com_port, BAUD_RATE)
+            .timeout(Duration::from_millis(5000))
+            .open()
+            .map_err(|e| anyhow!("LCD serial port acilamadi: {}", e))?;
 
         thread::spawn(move || {
-            let port = match serialport::new(&port_name, BAUD_RATE)
-                .timeout(Duration::from_millis(5000))
-                .open()
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    log::error!("LCD serial port acilamadi (arka plan): {}", e);
-                    return;
-                }
-            };
-            let mut port = port;
 
             loop {
                 match rx.recv() {

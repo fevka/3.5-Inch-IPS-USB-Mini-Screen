@@ -238,6 +238,99 @@ pub fn list_themes() -> Vec<String> {
     themes
 }
 
+/// Creates a brand-new theme folder from scratch: copies the chosen
+/// background image in, and writes a minimal but valid theme.yaml that
+/// has the display block + the background. No elements yet - those are
+/// added from the visual palette. Fails if the theme name already
+/// exists.
+#[tauri::command]
+pub fn create_theme(name: String, background_src: String) -> Result<(), String> {
+    let trimmed = name.trim().to_string();
+    if trimmed.is_empty() {
+        return Err("Theme name cannot be empty".into());
+    }
+    if trimmed.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+        return Err("Theme name contains invalid characters".into());
+    }
+    let dir = paths::theme_dir(&trimmed);
+    if dir.exists() {
+        return Err(format!("Theme '{}' already exists", trimmed));
+    }
+    if !background_src.is_empty() && !std::path::Path::new(&background_src).exists() {
+        return Err(format!("Background image not found: {}", background_src));
+    }
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Could not create theme folder: {e}"))?;
+
+    let bg_name = "background.png";
+    let bg_path = dir.join(bg_name);
+    if !background_src.is_empty() {
+        std::fs::copy(&background_src, &bg_path)
+            .map_err(|e| format!("Could not copy background image: {e}"))?;
+    } else {
+        // Fallback: blank 320x480 background so the theme always renders.
+        let blank = image::RgbImage::from_pixel(320, 480, image::Rgb([20, 20, 28]));
+        blank.save(&bg_path).map_err(|e| format!("Could not write background image: {e}"))?;
+    }
+
+    let (w, h) = image::image_dimensions(&bg_path)
+        .map(|(w, h)| (w, h))
+        .unwrap_or((320, 480));
+
+    let yaml = format!(
+        r#"# Created with the Mini System Monitor visual theme editor.
+author: "user"
+display:
+  DISPLAY_SIZE: 3.5"
+  DISPLAY_ORIENTATION: portrait
+  DISPLAY_RGB_LED: 180, 80, 255
+static_images:
+  BACKGROUND:
+    PATH: {bg_name}
+    X: 0
+    Y: 0
+    WIDTH: {w}
+    HEIGHT: {h}
+static_text: {{}}
+STATS: {{}}
+DATE: {{}}
+"#,
+        bg_name = bg_name, w = w, h = h
+    );
+    std::fs::write(dir.join("theme.yaml"), yaml)
+        .map_err(|e| format!("Could not write theme.yaml: {e}"))?;
+
+    Ok(())
+}
+
+/// Lets the user pick an image file via a native Open dialog. Returns
+/// the absolute path, or None if they cancelled.
+#[tauri::command]
+pub fn select_image_file() -> Result<Option<String>, String> {
+    let script = r#"
+        Add-Type -AssemblyName System.Windows.Forms
+        $d = New-Object System.Windows.Forms.OpenFileDialog
+        $d.Filter = "Images (*.png;*.jpg;*.jpeg;*.bmp)|*.png;*.jpg;*.jpeg;*.bmp"
+        $d.Title = "Select theme background image"
+        if ($d.ShowDialog() -eq "OK") { Write-Output $d.FileName }
+    "#;
+    let output = Command::new("powershell")
+        .args(["-NoProfile", "-Command", script])
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .map_err(|e| format!("Failed to open image dialog: {e}"))?;
+
+    if output.status.success() {
+        let path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if path.is_empty() {
+            Ok(None)
+        } else {
+            Ok(Some(path))
+        }
+    } else {
+        Ok(None)
+    }
+}
+
 #[tauri::command]
 fn theme_name(theme: &str) -> &str {
     if theme.is_empty() { "NexusMeter" } else { theme }
@@ -432,7 +525,7 @@ pub fn set_startup(enabled: bool, delay_seconds: u32) -> Result<(), String> {
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>Parallel</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <AllowHardTerminate>false</AllowHardTerminate>

@@ -158,6 +158,7 @@
       <div class="theme-toolbar">
         <label>Theme:</label>
         <select id="theme-select"></select>
+        <button class="btn" id="new-theme-btn">+ New Theme</button>
         <span class="spacer"></span>
         <span id="theme-status" class="status"></span>
         <button class="btn primary" id="save-theme">Save</button>
@@ -166,6 +167,7 @@
       <div class="theme-grid">
         <div class="pane" id="visual-pane">
           <h2>Visual Editor</h2>
+          <div id="element-palette"></div>
           <div id="element-list"></div>
         </div>
 
@@ -175,7 +177,8 @@
         </div>
 
         <div class="pane" id="preview-pane">
-          <h2>Live Preview <span class="hint">(click or drag elements)</span></h2>
+          <h2>Live Preview <span class="hint">(click or drag elements, Shift+click to multi-select)</span></h2>
+          <div id="align-toolbar" class="align-toolbar"></div>
           <div class="preview-frame">
             <div class="preview-stage" id="preview-stage">
               <img id="preview-img" alt="preview" />
@@ -185,6 +188,106 @@
         </div>
       </div>
     </section>
+  </div>
+
+  <div id="new-theme-modal" class="modal-overlay hidden">
+    <div class="modal">
+      <h2>Create New Theme</h2>
+      <div class="field">
+        <label>Theme name</label>
+        <input id="new-theme-name" placeholder="e.g. MyTheme" />
+      </div>
+      <div class="field">
+        <label>Background image</label>
+        <div class="row">
+          <input id="new-theme-bg" readonly placeholder="No image selected (blank 320x480)" />
+          <button class="btn" id="new-theme-browse">Browse…</button>
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" id="new-theme-cancel">Cancel</button>
+        <button class="btn primary" id="new-theme-create">Create</button>
+      </div>
+    </div>
+  </div>
+
+  <div id="add-element-modal" class="modal-overlay hidden">
+    <div class="modal add-element-modal">
+      <h2>Add Element</h2>
+      <div class="field">
+        <label>Type</label>
+        <select id="add-el-type"></select>
+      </div>
+      <div class="grid-2 add-el-grid">
+        <div class="field">
+          <label>X</label>
+          <div class="num-input">
+            <input id="add-el-x" type="number" step="1" />
+            <div class="num-btn">
+              <button data-target="add-el-x" data-dir="up">▲</button>
+              <button data-target="add-el-x" data-dir="dn">▼</button>
+            </div>
+          </div>
+        </div>
+        <div class="field">
+          <label>Y</label>
+          <div class="num-input">
+            <input id="add-el-y" type="number" step="1" />
+            <div class="num-btn">
+              <button data-target="add-el-y" data-dir="up">▲</button>
+              <button data-target="add-el-y" data-dir="dn">▼</button>
+            </div>
+          </div>
+        </div>
+        <div class="field add-el-text">
+          <label>Text</label>
+          <input id="add-el-text" type="text" />
+        </div>
+        <div class="field add-el-size">
+          <label>Font size</label>
+          <div class="num-input">
+            <input id="add-el-font-size" type="number" step="1" />
+            <div class="num-btn">
+              <button data-target="add-el-font-size" data-dir="up">▲</button>
+              <button data-target="add-el-font-size" data-dir="dn">▼</button>
+            </div>
+          </div>
+        </div>
+        <div class="field add-el-color">
+          <label>Text color</label>
+          <input id="add-el-color" type="color" />
+        </div>
+        <div class="field add-el-bar-color">
+          <label>Bar color</label>
+          <input id="add-el-bar-color" type="color" />
+        </div>
+        <div class="field add-el-w">
+          <label>Width</label>
+          <div class="num-input">
+            <input id="add-el-w" type="number" step="1" />
+            <div class="num-btn">
+              <button data-target="add-el-w" data-dir="up">▲</button>
+              <button data-target="add-el-w" data-dir="dn">▼</button>
+            </div>
+          </div>
+        </div>
+        <div class="field add-el-h">
+          <label>Height</label>
+          <div class="num-input">
+            <input id="add-el-h" type="number" step="1" />
+            <div class="num-btn">
+              <button data-target="add-el-h" data-dir="up">▲</button>
+              <button data-target="add-el-h" data-dir="dn">▼</button>
+            </div>
+          </div>
+        </div>
+      </div>
+      <p class="status add-el-hint">Tip: set position before adding to avoid overlap. You can also drag it afterwards.</p>
+      <div class="modal-actions">
+        <button class="btn" id="add-el-cancel">Cancel</button>
+        <button class="btn primary" id="add-el-confirm">Add</button>
+      </div>
+    </div>
   </div>
 
   <script src="https://cdnjs.cloudflare.com/ajax/libs/js-yaml/4.1.0/js-yaml.min.js"></script>

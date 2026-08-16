@@ -273,6 +273,49 @@ $("theme-select").addEventListener("change", async (e) => {
   loadGeneralPreview(e.target.value);
 });
 
+// --- create new theme ---
+
+$("new-theme-btn").addEventListener("click", () => {
+  $("new-theme-modal").classList.remove("hidden");
+  $("new-theme-name").value = "";
+  $("new-theme-bg").value = "";
+  $("new-theme-name").focus();
+});
+
+$("new-theme-cancel").addEventListener("click", () => {
+  $("new-theme-modal").classList.add("hidden");
+});
+
+$("new-theme-browse").addEventListener("click", async () => {
+  try {
+    const path = await invoke("select_image_file");
+    if (path) $("new-theme-bg").value = path;
+  } catch (e) {
+    setStatus(themeStatus, "Image pick error: " + e, "error");
+  }
+});
+
+$("new-theme-create").addEventListener("click", async () => {
+  const name = $("new-theme-name").value.trim();
+  const bg = $("new-theme-bg").value.trim();
+  if (!name) {
+    setStatus(themeStatus, "Theme name is required.", "error");
+    return;
+  }
+  try {
+    await invoke("create_theme", { name, backgroundSrc: bg });
+    $("new-theme-modal").classList.add("hidden");
+    allThemes = await invoke("list_themes");
+    populateThemeSelect();
+    fillSelect($("cfg-theme"), allThemes, name);
+    await loadTheme(name);
+    loadGeneralPreview(name);
+    setStatus(themeStatus, "Theme '" + name + "' created.", "ok");
+  } catch (e) {
+    setStatus(themeStatus, "Create error: " + e, "error");
+  }
+});
+
 function populateThemeSelect() {
   fillSelect($("theme-select"), allThemes, currentTheme);
 }
@@ -381,8 +424,9 @@ function drawOverlay() {
   for (const box of currentLayout.boxes) {
     if (box.hidden) continue;
     const key = pathKey(box.path);
+    const isSingle = key === selectedKey;
     const div = document.createElement("div");
-    div.className = "el-box" + (key === selectedKey ? " selected" : "");
+    div.className = "el-box" + (isSingle ? " selected" : "");
     div.style.left = box.x * scaleX + "px";
     div.style.top = box.y * scaleY + "px";
     div.style.width = Math.max(6, box.w * scaleX) + "px";
@@ -398,11 +442,13 @@ function drawOverlay() {
 }
 
 function highlightSelection(path) {
-  selectedKey = pathKey(path);
+  const key = pathKey(path);
+  selectedKey = key;
   drawOverlay();
   for (const k in elementDetailsMap) {
     elementDetailsMap[k].classList.toggle("selected", k === selectedKey);
   }
+  updateAlignToolbarState();
 }
 
 function selectElement(path) {
@@ -429,12 +475,17 @@ function startDrag(e, box) {
   if (!node) return;
   const overlay = $("preview-overlay");
   const el = findOverlayBox(box.path);
+  // The YAML X/Y is anchor-dependent (e.g. "rt" means right edge), while the
+  // overlay box sits at the text's top-left corner. Keep both: YAML values
+  // for writing back, box.x/y (top-left) for visually tracking the box.
   dragState = {
     path: box.path,
     startMouseX: e.clientX,
     startMouseY: e.clientY,
     startX: node.X || 0,
     startY: node.Y || 0,
+    startBoxX: box.x,
+    startBoxY: box.y,
     scaleX: currentLayout.width / previewImg.clientWidth,
     scaleY: currentLayout.height / previewImg.clientHeight,
     overlayEl: el,
@@ -455,17 +506,23 @@ function onDragMove(e) {
   const dy = Math.round((e.clientY - dragState.startMouseY) * dragState.scaleY);
   const newX = dragState.startX + dx;
   const newY = dragState.startY + dy;
-  // Update YAML data
-  pathSet(parsedYaml, [...dragState.path, "X"], newX);
-  pathSet(parsedYaml, [...dragState.path, "Y"], newY);
-  // Update input fields
-  const key = pathKey(dragState.path);
-  if (elementInputsMap[key + ".X"]) elementInputsMap[key + ".X"].value = newX;
-  if (elementInputsMap[key + ".Y"]) elementInputsMap[key + ".Y"].value = newY;
-  // Move overlay box locally (no backend call)
+  const newBoxX = dragState.startBoxX + dx;
+  const newBoxY = dragState.startBoxY + dy;
+  // Update YAML data for the dragged element.
+  const p = dragState.path;
+  const node = pathGet(parsedYaml, p);
+  if (node) {
+    pathSet(parsedYaml, [...p, "X"], newX);
+    pathSet(parsedYaml, [...p, "Y"], newY);
+    const key = pathKey(p);
+    if (elementInputsMap[key + ".X"]) elementInputsMap[key + ".X"].value = newX;
+    if (elementInputsMap[key + ".Y"]) elementInputsMap[key + ".Y"].value = newY;
+  }
+  // Move overlay box locally (no backend call). The box tracks its top-left
+  // corner; the YAML X/Y keeps its anchor semantics.
   if (dragState.overlayEl) {
-    dragState.overlayEl.style.left = (newX * previewImg.clientWidth / currentLayout.width) + "px";
-    dragState.overlayEl.style.top = (newY * previewImg.clientHeight / currentLayout.height) + "px";
+    dragState.overlayEl.style.left = (newBoxX * previewImg.clientWidth / currentLayout.width) + "px";
+    dragState.overlayEl.style.top = (newBoxY * previewImg.clientHeight / currentLayout.height) + "px";
   }
 }
 
@@ -481,6 +538,519 @@ function onDragEnd() {
 }
 
 // --- visual element list ---
+
+// --- element palette (adding NEW elements to a theme) ---
+
+/// Shared field defaults injected into every element added from the
+/// palette, so it shows up immediately and is draggable.
+function defaultFontFor() {
+  // Use the theme's first available font if any, else a safe generic path.
+  if (parsedYaml && parsedYaml.static_text) {
+    for (const k of Object.keys(parsedYaml.static_text)) {
+      const n = parsedYaml.static_text[k];
+      if (n && n.FONT) return n.FONT;
+    }
+  }
+  return "generale-mono/GeneraleMonoA.ttf";
+}
+
+function themeBgPath() {
+  return (parsedYaml &&
+    parsedYaml.static_images &&
+    parsedYaml.static_images.BACKGROUND &&
+    parsedYaml.static_images.BACKGROUND.PATH) || "background.png";
+}
+
+function ensureTree(obj, path) {
+  let cur = obj;
+  for (let i = 0; i < path.length - 1; i++) {
+    if (cur[path[i]] == null || typeof cur[path[i]] !== "object") cur[path[i]] = {};
+    cur = cur[path[i]];
+  }
+  if (cur[path[path.length - 1]] == null) cur[path[path.length - 1]] = {};
+  return cur[path[path.length - 1]];
+}
+
+function uniqueKey(obj, base) {
+  if (obj[base] == null) return base;
+  let i = 2;
+  while (obj[base + "_" + i] != null) i++;
+  return base + "_" + i;
+}
+
+function addTextElement(category, name, text, x, y, fontSize, color) {
+  if (!parsedYaml) return;
+  if (!parsedYaml.static_text) parsedYaml.static_text = {};
+  const key = uniqueKey(parsedYaml.static_text, name);
+  parsedYaml.static_text[key] = {
+    TEXT: text,
+    X: x,
+    Y: y,
+    FONT: defaultFontFor(),
+    FONT_SIZE: fontSize,
+    FONT_COLOR: color,
+    BACKGROUND_IMAGE: themeBgPath(),
+    ALIGN: "left",
+    ANCHOR: "lt",
+  };
+  syncFromVisualEdit();
+  return ["static_text", key];
+}
+
+function addTextElementAt(name, text, x, y, fontSize, color) {
+  const path = addTextElement(name, name, text, x, y, fontSize, color);
+  renderElementList();
+  return path;
+}
+
+function addStatElement(cat, name) {
+  if (!parsedYaml) return;
+  if (!parsedYaml.STATS) parsedYaml.STATS = {};
+  if (!parsedYaml.STATS[cat]) parsedYaml.STATS[cat] = {};
+  const group = parsedYaml.STATS[cat];
+  const key = uniqueKey(group, name);
+  group[key] = buildStatTemplate(name);
+  syncFromVisualEdit();
+  return ["STATS", cat, key];
+}
+
+function addStatElementAt(cat, name, x, y, fontSize, color, barColor, w, h) {
+  if (!parsedYaml) return;
+  if (!parsedYaml.STATS) parsedYaml.STATS = {};
+  if (!parsedYaml.STATS[cat]) parsedYaml.STATS[cat] = {};
+  const group = parsedYaml.STATS[cat];
+  const key = uniqueKey(group, name);
+  group[key] = buildStatTemplate(name, x, y, fontSize, color, barColor, w, h);
+  syncFromVisualEdit();
+  renderElementList();
+  return ["STATS", cat, key];
+}
+
+/// Returns a realistic per-stat template node (with TEXT + GRAPH where
+/// appropriate) so newly-added stats show real geometry in the preview.
+function buildStatTemplate(name, x, y, fontSize, color, barColor, w, h) {
+  x = x != null ? x : 310;
+  y = y != null ? y : 20;
+  fontSize = fontSize != null ? fontSize : 16;
+  color = color != null ? color : "255, 255, 255";
+  barColor = barColor != null ? barColor : "107, 203, 255";
+  w = w != null ? w : 300;
+  h = h != null ? h : 8;
+  const bg = themeBgPath();
+  const t = { SHOW: true, SHOW_UNIT: true, X: x, Y: y, FONT: defaultFontFor(), FONT_SIZE: fontSize, FONT_COLOR: color, BACKGROUND_IMAGE: bg, ALIGN: "right", ANCHOR: "rt" };
+  const g = { SHOW: true, X: x, Y: y + 34, WIDTH: w, HEIGHT: h, MIN_VALUE: 0, MAX_VALUE: 100, BAR_COLOR: barColor, BAR_OUTLINE: false, BACKGROUND_IMAGE: bg };
+  switch (name) {
+    case "PERCENTAGE":
+      return { INTERVAL: 1, TEXT: { ...t }, GRAPH: { ...g } };
+    case "FREQUENCY":
+      return { INTERVAL: 5, TEXT: { ...t } };
+    case "TEMPERATURE":
+      return { INTERVAL: 5, TEXT: { ...t } };
+    case "MEMORY":
+      return { INTERVAL: 5, TEXT: { ...t } };
+    case "VIRTUAL":
+      return { INTERVAL: 5, GRAPH: { ...g }, PERCENT_TEXT: { ...t }, USED: { ...t } };
+    case "UPLOAD":
+      return { INTERVAL: 1, TEXT: { ...t } };
+    case "DOWNLOAD":
+      return { INTERVAL: 1, TEXT: { ...t } };
+    case "TEMPERATURE_FELT":
+      return { INTERVAL: 300, TEXT: { ...t } };
+    case "HUMIDITY":
+      return { INTERVAL: 300, TEXT: { ...t } };
+    case "WEATHER_DESCRIPTION":
+      return { INTERVAL: 300, TEXT: { ...t }, ICON: { SHOW: true, X: x, Y: y + 34, WIDTH: w, HEIGHT: h } };
+    default:
+      return { INTERVAL: 1, TEXT: { ...t } };
+  }
+}
+
+function addDateElement(name, fmt, x, y, fontSize, color) {
+  if (!parsedYaml) return;
+  if (!parsedYaml.DATE) parsedYaml.DATE = {};
+  const key = uniqueKey(parsedYaml.DATE, name);
+  parsedYaml.DATE[key] = {
+    INTERVAL: 1,
+    TEXT: {
+      FORMAT: fmt,
+      SHOW: true,
+      X: x != null ? x : 160,
+      Y: y != null ? y : 400,
+      FONT: defaultFontFor(),
+      FONT_SIZE: fontSize != null ? fontSize : 24,
+      FONT_COLOR: color != null ? color : "255, 255, 255",
+      BACKGROUND_COLOR: "8, 8, 12",
+      ALIGN: "center",
+      ANCHOR: "mt",
+    },
+  };
+  syncFromVisualEdit();
+  return ["DATE", key];
+}
+
+function addDateElementAt(name, fmt, x, y, fontSize, color) {
+  const path = addDateElement(name, fmt, x, y, fontSize, color);
+  renderElementList();
+  return path;
+}
+
+const PALETTE = [
+  { group: "CPU", items: [
+    { name: "PERCENTAGE", label: "CPU % (text+bar)", kind: "stat", cat: "CPU", hasBar: true },
+    { name: "FREQUENCY", label: "CPU Frequency", kind: "stat", cat: "CPU" },
+    { name: "TEMPERATURE", label: "CPU Temp", kind: "stat", cat: "CPU" },
+  ]},
+  { group: "GPU", items: [
+    { name: "PERCENTAGE", label: "GPU % (text+bar)", kind: "stat", cat: "GPU", hasBar: true },
+    { name: "MEMORY", label: "GPU Memory", kind: "stat", cat: "GPU" },
+    { name: "TEMPERATURE", label: "GPU Temp", kind: "stat", cat: "GPU" },
+  ]},
+  { group: "MEMORY", items: [
+    { name: "VIRTUAL", label: "Memory (bar+text)", kind: "stat", cat: "MEMORY", hasBar: true },
+  ]},
+  { group: "NET", items: [
+    { name: "UPLOAD", label: "Upload speed", kind: "stat", cat: "NET" },
+    { name: "DOWNLOAD", label: "Download speed", kind: "stat", cat: "NET" },
+  ]},
+  { group: "WEATHER", items: [
+    { name: "TEMPERATURE", label: "Temp", kind: "stat", cat: "WEATHER" },
+    { name: "HUMIDITY", label: "Humidity", kind: "stat", cat: "WEATHER" },
+    { name: "TEMPERATURE_FELT", label: "Feels like", kind: "stat", cat: "WEATHER" },
+    { name: "WEATHER_DESCRIPTION", label: "Desc + icon", kind: "stat", cat: "WEATHER", hasIcon: true },
+  ]},
+  { group: "DATE", items: [
+    { name: "HOUR", label: "Clock", kind: "date", fmt: "short" },
+    { name: "DAY", label: "Day / date", kind: "date", fmt: "short" },
+  ]},
+  { group: "STATIC TEXT", items: [
+    { name: "LABEL", label: "Label (text)", kind: "text", text: "CPU Label" },
+    { name: "TITLE", label: "Title (big)", kind: "text", text: "My Title" },
+  ]},
+];
+
+// ---- add-element popup ----
+
+let addModalType = null; // currently selected PALETTE item
+
+function openAddModal(item) {
+  try {
+    addModalType = item;
+    // Populate type select only once (static), but keep it in sync.
+    if ($("add-el-type").options.length === 0) {
+      for (const group of PALETTE) {
+        const og = document.createElement("optgroup");
+        og.label = group.group;
+        for (const it of group.items) {
+        const opt = document.createElement("option");
+        opt.value = JSON.stringify({ name: it.name, cat: it.cat || "", kind: it.kind, hasBar: !!it.hasBar, hasIcon: !!it.hasIcon, fmt: it.fmt || "", text: it.text || "" });
+        opt.textContent = it.label;
+        og.appendChild(opt);
+      }
+      $("add-el-type").appendChild(og);
+    }
+  }
+  // Pre-select the clicked item
+  const wanted = JSON.stringify({ name: item.name, cat: item.cat || "", kind: item.kind, hasBar: !!item.hasBar, hasIcon: !!item.hasIcon, fmt: item.fmt || "", text: item.text || "" });
+  const opts = Array.from($("add-el-type").options);
+  const match = opts.find((o) => o.value === wanted);
+  if (match) $("add-el-type").value = match.value;
+
+  // Suggest a position that doesn't overlap: place below the lowest
+  // existing element, or top-left on empty themes.
+  const suggested = suggestFreePosition();
+  $("add-el-x").value = suggested.x;
+  $("add-el-y").value = suggested.y;
+  $("add-el-text").value = item.text || "";
+  $("add-el-font-size").value = 16;
+  $("add-el-color").value = "#ffffff";
+  $("add-el-bar-color").value = "#6bcbff";
+  $("add-el-w").value = 300;
+  $("add-el-h").value = 8;
+  updateAddModalFields();
+  $("add-element-modal").classList.remove("hidden");
+  } catch (e) {
+    setStatus(themeStatus, "Palette error: " + e.message, "error");
+    console.error("openAddModal failed", e);
+  }
+}
+
+function updateAddModalFields() {
+  if (!addModalType) return;
+  const kind = addModalType.kind;
+  const hasBar = addModalType.hasBar;
+  const hasIcon = addModalType.hasIcon;
+  setFieldVis("add-el-text", kind === "text");
+  setFieldVis("add-el-font-size", kind !== "date");
+  setFieldVis("add-el-color", kind !== "date");
+  setFieldVis("add-el-bar-color", hasBar);
+  setFieldVis("add-el-w", hasBar || hasIcon);
+  setFieldVis("add-el-h", hasBar || hasIcon);
+}
+
+function setFieldVis(id, show) {
+  const el = $(id);
+  el.closest(".field").style.display = show ? "" : "none";
+}
+
+/// Returns a free position that never overlaps existing elements, by
+/// scanning parsedYaml directly (not currentLayout, which is debounced
+/// and can be stale when the popup opens). Each new element lands
+/// below the lowest existing one, so repeated adds form a clean column.
+function suggestFreePosition() {
+  const SCREEN_H = 480;
+  let maxBottom = 20;
+  const consider = (x, y, w, h) => {
+    maxBottom = Math.max(maxBottom, y + h + 12);
+  };
+  if (parsedYaml) {
+    // STATS: per-group, per-item text/bar/icon nodes.
+    if (parsedYaml.STATS && typeof parsedYaml.STATS === "object") {
+      for (const cat of Object.values(parsedYaml.STATS)) {
+        if (!cat || typeof cat !== "object") continue;
+        for (const item of Object.values(cat)) {
+          if (!item || typeof item !== "object") continue;
+          for (const sub of Object.values(item)) {
+            if (!sub || typeof sub !== "object") continue;
+            const x = sub.X != null ? sub.X : 0;
+            const y = sub.Y != null ? sub.Y : 0;
+            const w = sub.WIDTH != null ? sub.WIDTH : 100;
+            const h = sub.HEIGHT != null ? sub.HEIGHT : (sub.FONT_SIZE != null ? sub.FONT_SIZE * 1.4 : 20);
+            consider(x, y, w, h);
+          }
+        }
+      }
+    }
+    // static_text and DATE.TEXT and static_images.
+    for (const [section, isStat] of [["static_text", false], ["DATE", false], ["static_images", false]]) {
+      const root = parsedYaml[section];
+      if (!root || typeof root !== "object") continue;
+      const items = section === "DATE" ? [root] : Object.values(root);
+      for (const item of items) {
+        if (!item || typeof item !== "object") continue;
+        const subs = section === "DATE" ? Object.values(item) : [item];
+        for (const sub of subs) {
+          if (!sub || typeof sub !== "object") continue;
+          const x = sub.X != null ? sub.X : 0;
+          const y = sub.Y != null ? sub.Y : 0;
+          const w = sub.WIDTH != null ? sub.WIDTH : 100;
+          const h = sub.HEIGHT != null ? sub.HEIGHT : (sub.FONT_SIZE != null ? sub.FONT_SIZE * 1.4 : 20);
+          consider(x, y, w, h);
+        }
+      }
+    }
+  }
+  const y = Math.min(maxBottom, SCREEN_H - 60);
+  return { x: 20, y };
+}
+
+$("add-el-type").addEventListener("change", () => {
+  const raw = $("add-el-type").value;
+  try {
+    addModalType = JSON.parse(raw);
+    updateAddModalFields();
+  } catch (e) { /* ignore */ }
+});
+
+$("add-el-cancel").addEventListener("click", () => {
+  $("add-element-modal").classList.add("hidden");
+  addModalType = null;
+});
+
+$("add-el-confirm").addEventListener("click", () => {
+  if (!addModalType) {
+    setStatus(themeStatus, "Add error: no element type selected.", "error");
+    return;
+  }
+  const x = parseInt($("add-el-x").value, 10) || 0;
+  const y = parseInt($("add-el-y").value, 10) || 0;
+  const fontSize = parseInt($("add-el-font-size").value, 10) || 16;
+  const color = $("add-el-color").value;
+  const barColor = $("add-el-bar-color").value;
+  const w = parseInt($("add-el-w").value, 10) || 300;
+  const h = parseInt($("add-el-h").value, 10) || 8;
+  const text = $("add-el-text").value.trim();
+
+  const t = addModalType;
+  let path = null;
+  try {
+    if (t.kind === "text") {
+      path = addTextElementAt(t.name, text || "Label", x, y, fontSize, color);
+    } else if (t.kind === "date") {
+      path = addDateElementAt(t.name, t.fmt, x, y, fontSize, color);
+    } else {
+      path = addStatElementAt(t.cat, t.name, x, y, fontSize, color, barColor, w, h);
+    }
+  } catch (e) {
+    setStatus(themeStatus, "Add error: " + e.message, "error");
+    return;
+  }
+  $("add-element-modal").classList.add("hidden");
+  addModalType = null;
+  if (path) selectElement(path);
+  setStatus(themeStatus, "Element added.", "ok");
+});
+
+function renderPalette() {
+  const host = $("element-palette");
+  host.innerHTML = "";
+  for (const group of PALETTE) {
+    const g = document.createElement("div");
+    g.className = "palette-group";
+    const title = document.createElement("span");
+    title.className = "palette-title";
+    title.textContent = group.group;
+    g.appendChild(title);
+    for (const item of group.items) {
+      const btn = document.createElement("button");
+      btn.className = "palette-btn";
+      btn.textContent = item.label;
+      btn.title = "Add " + item.name + " element";
+      btn.addEventListener("click", () => openAddModal(item));
+      g.appendChild(btn);
+    }
+    host.appendChild(g);
+  }
+}
+renderPalette();
+
+// --- align / arrange toolbar ---
+
+function buildAlignToolbar() {
+  const host = $("align-toolbar");
+  host.innerHTML = "";
+  const actions = [
+    { id: "align-left", label: "⬅ Align L", hint: "Align to screen left edge" },
+    { id: "align-hcenter", label: "⇌ Center X", hint: "Center horizontally on screen" },
+    { id: "align-right", label: "Align R ➡", hint: "Align to screen right edge" },
+    { id: "align-top", label: "⬆ Align T", hint: "Align to screen top edge" },
+    { id: "align-vcenter", label: "⇅ Center Y", hint: "Center vertically on screen" },
+    { id: "align-bottom", label: "Align B ⬇", hint: "Align to screen bottom edge" },
+  ];
+  for (const a of actions) {
+    const btn = document.createElement("button");
+    btn.className = "align-btn";
+    btn.textContent = a.label;
+    btn.title = a.hint;
+    btn.dataset.action = a.id;
+    btn.disabled = true;
+    btn.addEventListener("click", () => applyAlignAction(a.id));
+    host.appendChild(btn);
+  }
+}
+
+function selectedElementPaths() {
+  if (!selectedKey) return [];
+  return [selectedKey.split(".").filter((s) => s.length > 0)];
+}
+
+function updateAlignToolbarState() {
+  const btns = document.querySelectorAll(".align-btn");
+  btns.forEach((b) => {
+    b.disabled = !selectedKey;
+  });
+}
+
+function elementBounds(path) {
+  const node = pathGet(parsedYaml, path);
+  if (!node) return null;
+  const isWide = node.WIDTH !== undefined && node.HEIGHT !== undefined;
+  const w = isWide ? (node.WIDTH || 0) : 40;
+  const h = isWide ? (node.HEIGHT || 0) : 16;
+  const x = node.X || 0;
+  const y = node.Y || 0;
+  // For right/center anchored text the X is not the left edge; use the
+  // overlay geometry from compute_layout for real bounds.
+  const box = currentLayout && currentLayout.boxes.find((b) => pathKey(b.path) === pathKey(path));
+  if (box) {
+    return { x: box.x, y: box.y, w: box.w, h: box.h };
+  }
+  // Fallback: apply the anchor offsets ourselves so a text element whose box
+  // has not been computed yet still reports its true top-left corner.
+  if (!isWide) {
+    const anchor = (node.ANCHOR || "lt").split("");
+    const ha = anchor[0] || "l";
+    const va = anchor[1] || "t";
+    const estW = measureTextWidth(node);
+    const estH = node.FONT_SIZE || 14;
+    const fx = ha === "r" ? x - estW : ha === "m" ? x - Math.floor(estW / 2) : x;
+    const fy = va === "b" ? y - estH : va === "m" ? y - Math.floor(estH / 2) : y;
+    return { x: fx, y: fy, w: estW, h: estH };
+  }
+  return { x, y, w, h };
+}
+
+// Rough width estimate for a text node when the backend layout is not
+// available yet. Falls back to a per-character guess.
+let textMeasureCtx = null;
+function measureTextWidth(node) {
+  const s = String(node.TEXT || "");
+  const fs = node.FONT_SIZE || 14;
+  try {
+    if (!textMeasureCtx) {
+      const c = document.createElement("canvas");
+      textMeasureCtx = c.getContext("2d");
+    }
+    textMeasureCtx.font = `${fs}px sans-serif`;
+    return Math.max(4, Math.ceil(textMeasureCtx.measureText(s || "123").width));
+  } catch (e) {
+    return Math.max(4, Math.ceil(fs * 0.6 * (s.length || 3)));
+  }
+}
+
+function applyAlignAction(action) {
+  const paths = selectedElementPaths();
+  if (paths.length < 1) return;
+  const bounds = paths.map((p) => ({ p, b: elementBounds(p) })).filter((x) => x.b);
+  if (bounds.length < 1) return;
+
+  const screenW = (currentLayout && currentLayout.width) || previewImg.naturalWidth || 320;
+  const screenH = (currentLayout && currentLayout.height) || previewImg.naturalHeight || 240;
+
+  // Align actions snap the element to the screen edges/center.
+  for (const { p, b } of bounds) {
+    const node = pathGet(parsedYaml, p);
+    if (!node) continue;
+    const anchor = (node.ANCHOR || "lt").split("");
+    const ha = anchor[0] || "l";
+    const va = anchor[1] || "t";
+    // Recompute the X/Y the element needs to hold its edge/center at the target.
+    if (action === "align-left") {
+      node.X = 0 + ((ha === "l") ? 0 : (ha === "m" ? b.w / 2 : b.w));
+    } else if (action === "align-right") {
+      node.X = (screenW - b.w) + ((ha === "l") ? 0 : (ha === "m" ? b.w / 2 : b.w));
+    } else if (action === "align-hcenter") {
+      const cx = screenW / 2;
+      node.X = cx - b.w / 2 + ((ha === "l") ? 0 : (ha === "m" ? b.w / 2 : b.w));
+    } else if (action === "align-top") {
+      node.Y = 0 + ((va === "t") ? 0 : (va === "m" ? b.h / 2 : b.h));
+    } else if (action === "align-bottom") {
+      node.Y = (screenH - b.h) + ((va === "t") ? 0 : (va === "m" ? b.h / 2 : b.h));
+    } else if (action === "align-vcenter") {
+      const cy = screenH / 2;
+      node.Y = cy - b.h / 2 + ((va === "t") ? 0 : (va === "m" ? b.h / 2 : b.h));
+    }
+  }
+  syncFromVisualEdit();
+}
+
+buildAlignToolbar();
+updateAlignToolbarState();
+
+function removeElement(path) {
+  if (!parsedYaml) return;
+  // Walk to the parent, then delete the key. For STATS.X.NAME paths the
+  // parent may itself become empty - leave it, harmless.
+  if (path.length < 2) return;
+  const parentPath = path.slice(0, path.length - 1);
+  const key = path[path.length - 1];
+  const parent = pathGet(parsedYaml, parentPath);
+  if (parent && typeof parent === "object") {
+    delete parent[key];
+  }
+  selectedKey = null;
+  syncFromVisualEdit();
+  renderElementList();
+}
 
 /// Mirrors the Rust `scan_elements`: finds every node that has both X
 /// and Y, anywhere in the tree, regardless of depth.
@@ -506,11 +1076,22 @@ function renderElementList() {
   const elements = [];
   scanElements(parsedYaml, [], elements);
 
+  // Drop selections that no longer exist in the tree.
+  if (selectedKey && !elements.some((p) => pathKey(p) === selectedKey)) selectedKey = null;
+
   for (const path of elements) {
     const node = pathGet(parsedYaml, path);
     if (!node) continue;
     list.appendChild(renderElementItem(path, node));
   }
+
+  // Re-apply open state: whichever element is currently selected stays
+  // open after a re-render (e.g. after the field edit re-renders).
+  for (const k in elementDetailsMap) {
+    elementDetailsMap[k].open = k === selectedKey;
+  }
+
+  updateAlignToolbarState();
 
   if (elements.length === 0) {
     const p = document.createElement("p");
@@ -536,7 +1117,19 @@ function renderElementItem(path, node) {
     tag.textContent = "hidden";
     summary.appendChild(tag);
   }
-  summary.addEventListener("click", () => highlightSelection(path));
+  const delBtn = document.createElement("button");
+  delBtn.className = "del-btn";
+  delBtn.textContent = "✕";
+  delBtn.title = "Remove this element";
+  delBtn.addEventListener("click", (ev) => {
+    ev.stopPropagation();
+    removeElement(path);
+  });
+  summary.appendChild(delBtn);
+  summary.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    selectElement(path);
+  });
   details.appendChild(summary);
 
   elementDetailsMap[key] = details;

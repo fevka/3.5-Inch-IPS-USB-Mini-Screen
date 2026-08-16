@@ -323,7 +323,7 @@ select {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 0.95fr 1.15fr 1.3fr;
+  grid-template-columns: 1.1fr 1fr 1.3fr;
   grid-template-rows: minmax(0, 1fr);
   gap: 14px;
 }
@@ -378,6 +378,18 @@ select {
 }
 .el-item summary .path { color: var(--text); font-family: "Consolas", monospace; }
 .el-item summary .hidden-tag { color: var(--text-faint); font-size: 11px; }
+.el-item summary .del-btn {
+  all: unset;
+  color: var(--text-faint);
+  font-size: 11px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.12s, color 0.12s, background 0.12s;
+}
+.el-item summary:hover .del-btn { opacity: 1; }
+.el-item summary .del-btn:hover { color: var(--error); background: rgba(248, 113, 113, 0.12); }
 .el-body { padding: 8px 10px; display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .el-body .field { margin-bottom: 0; }
 .el-body .field.full { grid-column: 1 / -1; }
@@ -444,8 +456,134 @@ select {
 
 .el-box:active { cursor: grabbing; }
 .el-box.selected {
-  border-color: rgba(255, 255, 255, 0.5);
-  background: rgba(255, 255, 255, 0.08);
+  border-color: #00ffd5;
+  border-width: 2px;
+  background: rgba(0, 255, 213, 0.25);
+  box-shadow: 0 0 10px rgba(0, 255, 213, 0.55);
+  z-index: 3;
 }
+
+/* ---------- Element palette ---------- */
+
+#element-palette {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 8px;
+  padding-bottom: 10px;
+  margin-bottom: 8px;
+  border-bottom: 1px solid var(--border);
+}
+.palette-group {
+  flex: 0 1 auto;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  border-right: 1px solid var(--border);
+}
+.palette-group:last-child { border-right: none; padding-right: 0; }
+.palette-title {
+  flex: 0 0 auto;
+  color: var(--text-faint);
+  font-size: 10.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  margin: 0;
+  white-space: nowrap;
+}
+.palette-btn {
+  background: var(--card-hi);
+  border: 1px solid var(--border);
+  color: var(--text);
+  font-size: 11.5px;
+  padding: 4px 8px;
+  border-radius: 5px;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: border-color 0.15s, background 0.15s;
+}
+.palette-btn:hover { border-color: var(--accent); background: var(--card); }
+
+/* ---------- Align toolbar ---------- */
+
+.align-toolbar {
+  flex: 0 0 auto;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  padding-bottom: 10px;
+  margin-bottom: 8px;
+}
+.align-toolbar:empty { display: none; }
+.align-btn {
+  background: var(--card-hi);
+  border: 1px solid var(--border);
+  color: var(--text-faint);
+  font-size: 12px;
+  padding: 4px 9px;
+  border-radius: 5px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.align-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--text); }
+.align-btn:disabled { opacity: 0.35; cursor: default; }
+
+/* ---------- Modal ---------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.6);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 100;
+}
+.modal-overlay.hidden { display: none; }
+.modal {
+  background: var(--card);
+  border: 1px solid var(--border-hi);
+  border-radius: 10px;
+  padding: 22px;
+  width: 420px;
+  max-width: 90vw;
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+}
+.modal h2 { margin: 0 0 16px 0; font-size: 15px; color: var(--text); }
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+
+/* ---------- Add-element popup ---------- */
+
+.modal.add-element-modal { width: 560px; }
+.add-el-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px 16px;
+}
+.add-el-grid .field { margin-bottom: 0; }
+.add-el-grid input[type="text"],
+.add-el-grid input[type="number"],
+.add-el-grid select {
+  width: 100%;
+  box-sizing: border-box;
+}
+.add-el-grid input[type="color"] {
+  width: 100%;
+  height: 34px;
+  padding: 2px;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  background: var(--bg);
+  cursor: pointer;
+}
+.add-el-grid input[type="color"]::-webkit-color-swatch-wrapper { padding: 2px; }
+.add-el-grid input[type="color"]::-webkit-color-swatch { border: none; border-radius: 3px; }
+.add-el-hint { font-size: 11.5px; margin: 12px 0 0 0; }
 
 

@@ -38,6 +38,7 @@ Tauri-based settings & theme editor.
 - [Running](#running)
 - [Configuration](#configuration)
 - [Themes](#themes)
+  - [Visual theme editor](#visual-theme-editor)
 - [Troubleshooting](#troubleshooting)
 - [Disclaimer](#disclaimer)
 
@@ -52,9 +53,9 @@ The project contains **two independent applications**:
    to the screen. It is a plain Rust binary, **not** a Tauri app, and lives in
    the system tray.
 2. **`configure-app`** — a Tauri desktop settings & theme editor. It reads and
-   writes `config.yaml`, lets you edit theme YAML both visually and as raw YAML,
-   shows a live preview, and can Start/Stop the monitor plus configure Windows
-   startup.
+   writes `config.yaml`, edits theme YAML **visually** (a live preview where you
+   can add, drag, align and tweak elements) or as raw YAML, and can Start/Stop
+   the monitor plus configure Windows startup.
 
 Rust is used for both applications. The settings UI uses HTML/CSS/JS, and the
 config/themes/data are plain YAML/PNG/TTF files.
@@ -268,8 +269,8 @@ Launch `configure.exe` from the settings app build output, then:
 - General tab: set COM port, theme, network interfaces, weather, brightness,
   display options and Windows-startup behavior.
 - **Start Monitor** / **Stop Monitor**: start or stop the daemon from the UI.
-- Theme Editor tab: edit the active theme visually and/or as YAML with a live
-  preview.
+- Theme Editor tab: a full **visual theme editor** with a live preview (see
+  [Visual theme editor](#visual-theme-editor)), plus raw YAML editing.
 
 ---
 
@@ -328,6 +329,36 @@ The **default theme** is `NexusMeter`. You can:
   `theme.yaml`.
 - Use the **Theme Editor** in the settings app for a live, clickable and
   draggable preview, or edit the raw YAML directly.
+
+### Visual theme editor
+
+The **Theme Editor** tab of the settings app edits the active theme through a
+live preview instead of raw YAML. It is built around a single, consistent
+concept: **every element with an `X`/`Y` position in the theme is an editable
+box on the preview**.
+
+- **Element palette** — a compact list of ready-to-add blocks (CPU %, GPU, MEM,
+  NET, WEATHER, DATE, static text/labels, bars, icons). Click one to open an
+  "Add element" dialog where you set the type, exact `X`/`Y`, text, font size,
+  colors and bar/icon width & height before it is inserted into the theme.
+- **Drag to move** — drag any box directly on the preview. The element follows
+  the cursor exactly (anchor-aware, so right/center-anchored text like
+  `ANCHOR: rt` / `mt` moves correctly) and the underlying YAML is updated.
+- **Click to select** — clicking a box on the preview (or an entry in the
+  element list on the left) selects that element; the two views stay in sync.
+  Selecting opens that element's details panel, where `X`/`Y`, text, colors,
+  font, size and `SHOW` can be edited numerically with immediate live feedback.
+- **Alignment toolbar** — with an element selected, snap it to the screen:
+  **Align L/R** (screen left/right edge), **Align T/B** (top/bottom edge), and
+  **Center X/Y** (screen center). Every action is applied to the single selected
+  element and is immediately visible on the preview.
+- **Delete** — remove an element with its delete button in the element list.
+- **Raw YAML** — the YAML editor stays in sync with every visual change, so you
+  can fine-tune anything by hand and see it reflected on the preview instantly.
+
+> The editor uses a **single-selection** model (one element at a time), which
+> keeps the layout structure of `theme.yaml` intact — each box corresponds to
+> one element block (e.g. a stat's `TEXT`/`GRAPH`/`ICON` sub-block).
 
 ### Supported theme elements
 

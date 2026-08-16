@@ -12,6 +12,8 @@ fn main() {
             commands::list_ports,
             commands::list_interfaces,
             commands::list_themes,
+            commands::create_theme,
+            commands::select_image_file,
             commands::list_fonts,
             commands::load_theme_yaml,
             commands::save_theme_yaml,
