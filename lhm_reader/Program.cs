@@ -24,13 +24,15 @@ namespace LhmReader
 
             computer.Open();
 
-            // Multiple update passes with delay - some sensors (Ryzen SMU)
-            // need time to initialize or multiple reads to report valid values
+            // Multiple update passes with short delay - some sensors (Ryzen SMU)
+            // need time to initialize or multiple reads to report valid values.
+            // Keep the passes/sleep minimal: this process runs on every sensor
+            // poll, so its wall time directly caps how fresh the values feel.
             var visitor = new UpdateVisitor();
-            for (int i = 0; i < 3; i++)
+            for (int i = 0; i < 2; i++)
             {
                 computer.Accept(visitor);
-                Thread.Sleep(200);
+                Thread.Sleep(50);
             }
 
             foreach (var hardware in computer.Hardware)

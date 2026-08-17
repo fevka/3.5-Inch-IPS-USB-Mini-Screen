@@ -10,6 +10,7 @@
   --text-faint: #8b949e;
   --error: #f87171;
   --ok: #4ade80;
+  --warn: #fbbf24;
 }
 
 * { box-sizing: border-box; }
@@ -166,6 +167,12 @@ html, body {
 .field.row { display: flex; align-items: center; }
 .field .row { display: flex; gap: 8px; }
 .field-row { display: flex; gap: 16px; flex-wrap: wrap; margin-bottom: 4px; }
+.warn-hint {
+  margin-top: 5px;
+  color: var(--warn);
+  font-size: 11px;
+  line-height: 1.4;
+}
 
 .checkbox {
   display: flex !important;

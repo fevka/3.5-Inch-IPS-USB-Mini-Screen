@@ -73,6 +73,7 @@ async function initGeneralTab() {
     $("reset-on-startup").checked = !!cfg.reset_on_startup;
     $("show-console").checked = !!cfg.show_console;
     $("lhm-path").value = cfg.lhm_path || "";
+    $("sensor-interval").value = cfg.sensor_interval_ms != null ? cfg.sensor_interval_ms : 2000;
 
     // Check startup task status
     invoke("check_startup").then((enabled) => {
@@ -158,6 +159,7 @@ $("save-config").addEventListener("click", async () => {
     run_on_startup: $("run-on-startup").checked,
     startup_delay: parseInt($("startup-delay").value) || 30,
     lhm_path: $("lhm-path").value || "",
+    sensor_interval_ms: parseInt($("sensor-interval").value) || 2000,
   };
   try {
     await invoke("save_config", { cfg });

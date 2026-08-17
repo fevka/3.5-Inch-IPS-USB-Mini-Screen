@@ -19,6 +19,10 @@ config:
   WEATHER_LONGITUDE: 28.9497
   WEATHER_UNITS: 'metric'
 
+  # How often sensor values (WMI + LHM) are refreshed, in milliseconds.
+  # Default 2000 (2s). Values below 1000ms increase CPU/IO load.
+  SENSOR_INTERVAL_MS: 1000
+
 display:
   # Display brightness percentage (0-100)
   BRIGHTNESS: 20

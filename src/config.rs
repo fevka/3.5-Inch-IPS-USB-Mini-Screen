@@ -21,6 +21,11 @@ pub struct ConfigSection {
     pub weather_latitude: Option<f64>,
     pub weather_longitude: Option<f64>,
     pub weather_units: Option<String>,
+    /// How often WMI/LHM sensor reads are refreshed, in milliseconds.
+    /// Default 2000 (2s). Lower values poll hardware more often and
+    /// raise CPU/IO load; values below 1000 are discouraged on a
+    /// physical status screen.
+    pub sensor_interval_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, Clone)]

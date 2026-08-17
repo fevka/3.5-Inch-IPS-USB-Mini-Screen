@@ -86,12 +86,21 @@ struct LhmJsonSensor {
 }
 
 static CACHE: Lazy<Mutex<Option<(Instant, LhmData)>>> = Lazy::new(|| Mutex::new(None));
+static REFRESH_INTERVAL_MS: Mutex<u64> = Mutex::new(3000);
+
+/// Adjusts how often lhm_reader.exe is polled. Default 3000 (3s).
+pub fn set_refresh_interval_ms(ms: u64) {
+    if let Ok(mut g) = REFRESH_INTERVAL_MS.lock() {
+        *g = ms;
+    }
+}
 
 pub fn refresh() -> LhmData {
+    let interval = REFRESH_INTERVAL_MS.lock().map(|g| *g).unwrap_or(3000);
     {
         let cache = CACHE.lock().unwrap();
         if let Some((last, ref data)) = *cache {
-            if last.elapsed() < Duration::from_secs(3) {
+            if last.elapsed() < Duration::from_millis(interval) {
                 return data.clone();
             }
         }

@@ -23,6 +23,8 @@ pub struct ConfigDto {
     pub run_on_startup: bool,
     pub startup_delay: u32,
     pub lhm_path: String,
+    /// Sensor (WMI/LHM) polling interval in ms. Default 2000.
+    pub sensor_interval_ms: u64,
 }
 
 impl Default for ConfigDto {
@@ -43,6 +45,7 @@ impl Default for ConfigDto {
             run_on_startup: false,
             startup_delay: 30,
             lhm_path: String::new(),
+            sensor_interval_ms: 2000,
         }
     }
 }
@@ -135,6 +138,9 @@ pub fn load_config() -> Result<ConfigDto, String> {
     if let Some(v) = yaml_str(&yaml, &["lhm", "LHM_PATH"]) {
         dto.lhm_path = v;
     }
+    if let Some(v) = yaml_u64(&yaml, &["config", "SENSOR_INTERVAL_MS"]) {
+        dto.sensor_interval_ms = v.clamp(100, 60_000);
+    }
     Ok(dto)
 }
 
@@ -161,6 +167,10 @@ config:
   WEATHER_LATITUDE: {weather_latitude}
   WEATHER_LONGITUDE: {weather_longitude}
   WEATHER_UNITS: '{weather_units}'
+
+  # How often sensor values (WMI + LHM) are refreshed, in milliseconds.
+  # Default 2000 (2s). Values below 1000ms increase CPU/IO load.
+  SENSOR_INTERVAL_MS: {sensor_interval_ms}
 
 display:
   # Display brightness percentage (0-100)
@@ -200,6 +210,7 @@ lhm:
         run_on_startup = cfg.run_on_startup,
         startup_delay = cfg.startup_delay,
         lhm_path = cfg.lhm_path,
+        sensor_interval_ms = cfg.sensor_interval_ms,
     );
     let path = paths::config_yaml_path();
     std::fs::write(&path, text).map_err(|e| format!("Save error ({}): {e}", path.display()))

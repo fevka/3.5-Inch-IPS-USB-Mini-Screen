@@ -124,8 +124,9 @@ mini/
 
 - `cargo build --release` compiles the monitor and (as part of the workspace)
   the settings app.
-- `build.rs` automatically copies `config.yaml` and the whole `res/` tree into
-  the `target/release/` (or `target/debug/`) folder **next to the compiled
+- `build.rs` automatically copies `config.yaml`, the whole `res/` tree and the
+  `LibreHardwareMonitor/` folder (DLLs + the compiled `lhm_reader.exe`) into the
+  `target/release/` (or `target/debug/`) folder **next to the compiled
   executable**, so the monitor can find its assets regardless of the current
   working directory.
 - The monitor also sets its own working directory to the executable's folder at
@@ -267,7 +268,7 @@ It will:
 Launch `configure.exe` from the settings app build output, then:
 
 - General tab: set COM port, theme, network interfaces, weather, brightness,
-  display options and Windows-startup behavior.
+  display options, sensor refresh rate and Windows-startup behavior.
 - **Start Monitor** / **Stop Monitor**: start or stop the daemon from the UI.
 - Theme Editor tab: a full **visual theme editor** with a live preview (see
   [Visual theme editor](#visual-theme-editor)), plus raw YAML editing.
@@ -290,6 +291,11 @@ config:
   WEATHER_LATITUDE: 41.01
   WEATHER_LONGITUDE: 28.95
   WEATHER_UNITS: 'metric' # metric (°C) or imperial (°F)
+
+  SENSOR_INTERVAL_MS: 2000  # how often WMI/LHM sensor reads refresh (ms).
+                            # Lower values poll hardware more often and
+                            # raise CPU/IO load; 2000-3000 recommended.
+                            # Values below 1000ms are discouraged.
 
 display:
   BRIGHTNESS: 20          # 0-100
@@ -424,7 +430,13 @@ KB/s`, etc., so units are fully under your control.
 - **Weather not showing:** `WEATHER_LATITUDE`/`WEATHER_LONGITUDE` must be set,
   and the machine needs an internet connection (uses the free Open-Meteo API).
 - **Log file:** a `monitor.log` file next to the executable records startup
-  steps and serial/display errors to help diagnose issues.
+  steps and serial/display errors to help diagnose issues. The same messages
+  also go to the console when `SHOW_CONSOLE: true`.
+- **Temperature/load values update slowly:** sensor values are polled at
+  `SENSOR_INTERVAL_MS` (default 2000 ms). Raise/lower it in `config.yaml` or in
+  the settings app under **Advanced → Sensor refresh rate**. Lower values poll
+  the hardware more often at the cost of extra CPU/IO load; on a physical
+  status screen 2000–3000 ms is the sweet spot.
 
 ### Run as Administrator is required for temperatures
 
@@ -474,7 +486,10 @@ Common problems and fixes:
   actual `mini-system-monitor.exe` (working directory set to its folder).
 - **Monitor starts but screen stays black at logon.** The USB display may not
   have finished enumerating yet — increase `startup: DELAY` in `config.yaml`
-  (e.g. 30–45 s) so the serial port is available.
+  (e.g. 30–45 s) so the serial port is available. Only **one** monitor process
+  may run at a time — a second instance is rejected via a named mutex, since
+  two processes writing the same COM port corrupt the screen. If the tray icon
+  disappears right after launch, an earlier instance is already running.
 - **Task not created because not running as admin.** Registering a scheduled
   task that runs with highest privileges requires an administrator account. Run
   the Settings app as administrator to create/modify the task.

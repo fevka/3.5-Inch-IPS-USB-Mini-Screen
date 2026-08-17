@@ -29,6 +29,15 @@ fn copy_assets() {
         copy_dir_recursive(&src_res, &dst_res);
         println!("cargo:warning=res/ copied to {}", dst_res.display());
     }
+
+    // Copy LibreHardwareMonitor/ (LHM reader needs its DLLs + the compiled
+    // lhm_reader.exe next to the executable)
+    let src_lhm = manifest_dir.join("LibreHardwareMonitor");
+    let dst_lhm = profile_dir.join("LibreHardwareMonitor");
+    if src_lhm.exists() {
+        copy_dir_recursive(&src_lhm, &dst_lhm);
+        println!("cargo:warning=LibreHardwareMonitor/ copied to {}", dst_lhm.display());
+    }
 }
 
 fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) {

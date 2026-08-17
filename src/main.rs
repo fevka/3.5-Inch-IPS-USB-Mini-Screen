@@ -372,7 +372,7 @@ fn alloc_console() {}
 /// ayakta kalir. Mutex tutamacini kapatmak istemedigimiz icin process
 /// boyunca acik tutulur (bilincli sizinti, process zaten tekil).
 #[cfg(windows)]
-fn ensure_single_instance() {
+fn ensure_single_instance() -> windows_sys::Win32::Foundation::HANDLE {
     use windows_sys::Win32::Foundation::{ERROR_ALREADY_EXISTS, HANDLE};
     use windows_sys::Win32::System::Threading::CreateMutexW;
     use std::os::windows::ffi::OsStrExt;
@@ -387,10 +387,13 @@ fn ensure_single_instance() {
         {
             std::process::exit(0);
         }
+        // Keep the mutex handle alive for the whole process so a second
+        // instance is actually rejected (a dropped handle releases it).
+        handle
     }
 }
 #[cfg(not(windows))]
-fn ensure_single_instance() {}
+fn ensure_single_instance() -> () { () }
 
 /// Lightweight, tolerant peek at config.yaml's DISPLAY.SHOW_CONSOLE -
 /// deliberately independent of the strict `AppConfig::load` used by
@@ -407,8 +410,63 @@ fn should_show_console() -> bool {
         .unwrap_or(false)
 }
 
+/// Logger that mirrors every log record to BOTH stderr (so the console
+/// path keeps working unchanged) and a `monitor.log` file next to the
+/// executable. This makes startup failures (which often run hidden via
+/// Task Scheduler) diagnosable even when the console is disabled.
+struct FileMirrorLogger {
+    file: std::sync::Mutex<std::fs::File>,
+}
+
+impl log::Log for FileMirrorLogger {
+    fn enabled(&self, _metadata: &log::Metadata) -> bool { true }
+
+    fn log(&self, record: &log::Record) {
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let line = format!("[{} {} {}] {}\n", ts, record.level(), record.target(), record.args());
+        // stderr (console) as before
+        eprint!("{}", line);
+        let _ = std::io::Write::flush(&mut std::io::stderr());
+        // mirror to monitor.log next to the executable
+        if let Ok(mut f) = self.file.lock() {
+            use std::io::Write as _;
+            let _ = f.write_all(line.as_bytes());
+            let _ = f.flush();
+        }
+    }
+
+    fn flush(&self) {
+        use std::io::Write as _;
+        if let Ok(mut f) = self.file.lock() {
+            let _ = f.flush();
+        }
+    }
+}
+
+fn init_logging() {
+    let path = match std::env::current_exe() {
+        Ok(exe) => exe.parent().map(|p| p.join("monitor.log")).unwrap_or_else(|| std::path::PathBuf::from("monitor.log")),
+        Err(_) => std::path::PathBuf::from("monitor.log"),
+    };
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .unwrap_or_else(|_| std::fs::File::create(&path).unwrap_or_else(|_| {
+            // Last resort: /dev/null-ish sink so logging never panics.
+            std::fs::File::open(std::path::Path::new("NUL")).expect("NUL available")
+        }));
+    let logger = FileMirrorLogger { file: std::sync::Mutex::new(file) };
+    let level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|v| v.parse::<log::LevelFilter>().ok())
+        .unwrap_or(log::LevelFilter::Info);
+    let _ = log::set_boxed_logger(Box::new(logger));
+    log::set_max_level(level);
+}
+
 fn main() {
-    ensure_single_instance();
+    let _single_instance_guard = ensure_single_instance();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
             Some(s) => *s,
@@ -444,10 +502,7 @@ fn main() {
         alloc_console();
     }
 
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Info)
-        .parse_default_env()
-        .init();
+    init_logging();
 
     if let Err(e) = run() {
         // Make sure the error is visible even if the console was
@@ -559,6 +614,17 @@ fn run() -> Result<()> {
         cfg.config.wlo.clone(),
     )));
     let stats_bg = stats.clone();
+
+    // Optional sensor polling interval from config.yaml (SENSOR_INTERVAL_MS).
+    // Defaults stay at 2000ms (WMI) / 3000ms (LHM). Values below 1000ms
+    // poll hardware more often and raise CPU/IO load - the UI warns about it.
+    if let Some(ms) = cfg.config.sensor_interval_ms {
+        let ms = ms.clamp(100, 60_000);
+        sensors::set_wmi_refresh_interval_ms(ms);
+        lhm::set_refresh_interval_ms(ms);
+        log::info!("Sensor refresh interval set to {}ms (LHM {}ms)", ms, ms);
+    }
+
     thread::spawn(move || {
         loop {
             // ONEMLI: yavas olabilecek sensor okumalari (WMI sorgulari,

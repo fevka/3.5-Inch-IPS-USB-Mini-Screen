@@ -136,12 +136,22 @@ struct GpuAdapterMemory {
 // own 3s cache).
 static LAST_WMI_REFRESH: Lazy<Mutex<Option<Instant>>> = Lazy::new(|| Mutex::new(None));
 const WMI_REFRESH_INTERVAL: Duration = Duration::from_secs(2);
+static WMI_REFRESH_INTERVAL_MS: Mutex<u64> = Mutex::new(2000);
+
+/// Adjusts how often the WMI sensor queries run. Default 2000 (2s).
+/// Lower values poll hardware more often and raise CPU/IO load.
+pub fn set_wmi_refresh_interval_ms(ms: u64) {
+    if let Ok(mut g) = WMI_REFRESH_INTERVAL_MS.lock() {
+        *g = ms;
+    }
+}
 
 pub fn refresh_all() {
+    let wmi_interval_ms = WMI_REFRESH_INTERVAL_MS.lock().map(|g| *g).unwrap_or(2000);
     {
         let mut last = LAST_WMI_REFRESH.lock().unwrap();
         let due = match *last {
-            Some(t) => t.elapsed() >= WMI_REFRESH_INTERVAL,
+            Some(t) => t.elapsed() >= Duration::from_millis(wmi_interval_ms),
             None => true,
         };
         if !due {
