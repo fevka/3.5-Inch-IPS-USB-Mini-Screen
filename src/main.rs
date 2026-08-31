@@ -465,7 +465,28 @@ fn init_logging() {
     log::set_max_level(level);
 }
 
+/// LCD watchdog tarafindan `--wait-and-relaunch` ile baslatilan kisa omurlu
+/// yardimci surec: 5 saniye bekler (asil surecin mutex'i birakip portu
+/// birakmasi ve USB ekranin yeniden enumerate olmasi icin), sonra monitoru
+/// normal sekilde yeniden baslatir ve kendisi kapanir. Bu, tek-instance
+/// mutex'i ile yarismadan temiz bir restart saglar.
+fn restarter_main() {
+    use std::io::Write as _;
+    std::thread::sleep(Duration::from_secs(5));
+    if let Ok(exe) = std::env::current_exe() {
+        if let Ok(mut child) = std::process::Command::new(&exe).spawn() {
+            log::info!("Restart: yeni monitor sureci baslatildi");
+            let _ = child.wait();
+        }
+    }
+    std::process::exit(0);
+}
+
 fn main() {
+    if std::env::args().any(|a| a == "--wait-and-relaunch") {
+        restarter_main();
+    }
+
     let _single_instance_guard = ensure_single_instance();
     std::panic::set_hook(Box::new(|info| {
         let msg = match info.payload().downcast_ref::<&str>() {
@@ -570,7 +591,20 @@ fn run() -> Result<()> {
         };
 
         let brightness = cfg.display.brightness.unwrap_or(20);
-        match LcdComm::new(&com_port) {
+
+        // LCD watchdog: surekli yazma hatasi olursa yardimci sureci
+        // baslatir ve bu sureci sonlandirir (mutex'i birakir). Yardimci
+        // surec 5 sn sonra monitoru yeniden baslatir.
+        let restart = || {
+            if let Ok(exe) = std::env::current_exe() {
+                let _ = std::process::Command::new(exe)
+                    .arg("--wait-and-relaunch")
+                    .spawn();
+            }
+            std::process::exit(1);
+        };
+
+        match LcdComm::new(&com_port, Box::new(restart)) {
             Ok(d) => {
                 if let Err(e) = d.initialize(brightness) {
                     log::error!("LCD init error (continuing): {}", e);

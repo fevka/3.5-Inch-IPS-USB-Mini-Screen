@@ -27,7 +27,7 @@ pub struct LcdComm {
 }
 
 impl LcdComm {
-    pub fn new(com_port: &str) -> Result<Self> {
+    pub fn new(com_port: &str, on_hard_failure: Box<dyn Fn() + Send + Sync>) -> Result<Self> {
         let (tx, rx) = mpsc::channel::<LcdCommand>();
 
         // Portu SENKRON ac. Eski kod portu ayri bir thread icinde
@@ -39,8 +39,26 @@ impl LcdComm {
             .open()
             .map_err(|e| anyhow!("LCD serial port acilamadi: {}", e))?;
 
-        thread::spawn(move || {
+        // Bekcim: ust uste "failed to write whole buffer" gibi dogalayici
+        // yazma hatalari (port aciliyor ama cihaz veri almadan donuyor)
+        // surekli tekrarlanip programin baslamasini engelliyor. Cok fazla
+        // ard arda basarisizliktan sonra on_hard_failure cagrilir ve
+        // cagiran taraf (main.rs) tum sureci 5 saniye sonra yeniden baslatir.
+        const FAILURE_LIMIT: u32 = 3;
+        let mut consecutive_failures: u32 = 0;
+        let mut report_failure = move |e: &dyn std::fmt::Display, consecutive_failures: &mut u32| {
+            log::error!("LCD write hatasi: {}", e);
+            *consecutive_failures += 1;
+            if *consecutive_failures >= FAILURE_LIMIT {
+                log::error!(
+                    "LCD ard arda {} kez yazamadi, program 5 sn sonra yeniden baslatiliyor",
+                    *consecutive_failures
+                );
+                on_hard_failure();
+            }
+        };
 
+        thread::spawn(move || {
             loop {
                 match rx.recv() {
                     Ok(LcdCommand::DisplayImage { rgb565, x, y, w, h }) => {
@@ -48,32 +66,53 @@ impl LcdComm {
                         let y1 = y + h - 1;
                         let header = encode_header(x, y, x1, y1, 197);
                         if let Err(e) = port.write_all(&header) {
-                            log::error!("LCD header hatasi: {}", e);
+                            report_failure(&e, &mut consecutive_failures);
                             continue;
                         }
+                        let mut ok = true;
                         for chunk in rgb565.chunks(320 * 8) {
                             if let Err(e) = port.write_all(chunk) {
-                                log::error!("LCD pixel hatasi: {}", e);
+                                report_failure(&e, &mut consecutive_failures);
+                                ok = false;
                                 break;
                             }
+                        }
+                        if ok {
+                            consecutive_failures = 0;
                         }
                         let _ = port.flush();
                     }
                     Ok(LcdCommand::Reset) => {
-                        let _ = port.write_all(&encode_header(0, 0, 0, 0, 101));
+                        if let Err(e) = port.write_all(&encode_header(0, 0, 0, 0, 101)) {
+                            report_failure(&e, &mut consecutive_failures);
+                            continue;
+                        }
+                        consecutive_failures = 0;
                         let _ = port.flush();
                     }
                     Ok(LcdCommand::ScreenOff) => {
-                        let _ = port.write_all(&encode_header(0, 0, 0, 0, 108));
+                        if let Err(e) = port.write_all(&encode_header(0, 0, 0, 0, 108)) {
+                            report_failure(&e, &mut consecutive_failures);
+                            continue;
+                        }
+                        consecutive_failures = 0;
                         let _ = port.flush();
                     }
                     Ok(LcdCommand::ScreenOn) => {
-                        let _ = port.write_all(&encode_header(0, 0, 0, 0, 109));
+                        if let Err(e) = port.write_all(&encode_header(0, 0, 0, 0, 109)) {
+                            report_failure(&e, &mut consecutive_failures);
+                            continue;
+                        }
+                        consecutive_failures = 0;
                         let _ = port.flush();
                     }
                     Ok(LcdCommand::SetBrightness(level)) => {
                         let level_abs = 255u16 - ((level as u16 * 255) / 100);
-                        let _ = port.write_all(&encode_header(level_abs, 0, 0, 0, 110));
+                        if let Err(e) = port.write_all(&encode_header(level_abs, 0, 0, 0, 110)) {
+                            report_failure(&e, &mut consecutive_failures);
+                            continue;
+                        }
+                        consecutive_failures = 0;
                         let _ = port.flush();
                     }
                     Ok(LcdCommand::SetOrientation(orientation, width, height)) => {
@@ -84,7 +123,11 @@ impl LcdComm {
                         buf[8] = (width & 0xff) as u8;
                         buf[9] = (height >> 8) as u8;
                         buf[10] = (height & 0xff) as u8;
-                        let _ = port.write_all(&buf);
+                        if let Err(e) = port.write_all(&buf) {
+                            report_failure(&e, &mut consecutive_failures);
+                            continue;
+                        }
+                        consecutive_failures = 0;
                         let _ = port.flush();
                     }
                     Ok(LcdCommand::Quit) => break,
